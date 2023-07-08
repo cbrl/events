@@ -237,21 +237,20 @@ public:
 		// callbacks once it has completed. The actual operation is deferred to be later executed as part of a
 		// parallel_group.
 		auto post_op = [this, &args_tuple](typename container_type::pointer ptr) {
-			return boost::asio::post(
-				executor,
-				boost::asio::deferred([this, ptr, &args = *args_tuple]() mutable {
-					if constexpr (std::same_as<void, ReturnT>) {
-						std::apply(*ptr, args);
-						release_callback(ptr);
-						return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
-					}
-					else {
-						auto result = std::apply(*ptr, args);
-						release_callback(ptr);
-						return boost::asio::deferred_t::values(std::move(result));
-					}
-				})
-			);
+			auto execute = [this, ptr, &args = *args_tuple]() mutable {
+				if constexpr (std::same_as<void, ReturnT>) {
+					std::apply(*ptr, args);
+					release_callback(ptr);
+					return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
+				}
+				else {
+					auto result = std::apply(*ptr, args);
+					release_callback(ptr);
+					return boost::asio::deferred_t::values(std::move(result));
+				}
+			};
+
+			return boost::asio::post(executor, boost::asio::deferred(std::move(execute)));
 		};
 
 		// Create the deferred callback invocation for each callback
@@ -479,19 +478,18 @@ public:
 		// This will post a function which will invoke the callback then re-add itself to the list of pending callbacks
 		// once it has completed. The actual operation is deferred to be later executed as part of a parallel_group.
 		auto post_op = [this, &args_tuple](typename container_type::reference callback_ptr) {
-			return boost::asio::post(
-				executor,
-				boost::asio::deferred([callback_ptr, &args = *args_tuple]() mutable {
-					if constexpr (std::same_as<void, ReturnT>) {
-						std::apply(*callback_ptr, args);
-						return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
-					}
-					else {
-						auto result = std::apply(*callback_ptr, args);
-						return boost::asio::deferred_t::values(std::move(result));
-					}
-				})
-			);
+			auto execute = [callback_ptr, &args = *args_tuple]() mutable {
+				if constexpr (std::same_as<void, ReturnT>) {
+					std::apply(*callback_ptr, args);
+					return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
+				}
+				else {
+					auto result = std::apply(*callback_ptr, args);
+					return boost::asio::deferred_t::values(std::move(result));
+				}
+			};
+
+			return boost::asio::post(executor, boost::asio::deferred(std::move(execute)));
 		};
 
 		using post_op_type = decltype(post_op(std::declval<typename container_type::reference>()));
