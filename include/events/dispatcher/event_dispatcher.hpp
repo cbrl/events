@@ -21,7 +21,15 @@ class discrete_event_dispatcher;
 template<>
 class [[nodiscard]] discrete_event_dispatcher<void> {
 public:
+	discrete_event_dispatcher() = default;
+	discrete_event_dispatcher(discrete_event_dispatcher const&) = delete;
+	discrete_event_dispatcher(discrete_event_dispatcher&&) noexcept = default;
+
 	virtual ~discrete_event_dispatcher() = default;
+
+	auto operator=(discrete_event_dispatcher const&) -> discrete_event_dispatcher& = delete;
+	auto operator=(discrete_event_dispatcher&&) noexcept -> discrete_event_dispatcher& = default;
+
 	virtual auto dispatch() -> void = 0;
 	virtual auto clear() -> void = 0;
 	virtual auto size() -> size_t = 0;
@@ -202,6 +210,7 @@ public:
 	 * @return The number of events of this type that are in the queue
 	 */
 	template<typename EventT>
+	[[nodiscard]]
 	auto queue_size() const -> size_t {
 		auto const key = std::type_index{typeid(EventT)};
 

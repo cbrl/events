@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <utility>
 
 
 namespace events {
@@ -15,7 +16,7 @@ class connection {
 	template<typename...>
 	friend class async_signal_handler;
 
-	connection(std::function<void()> const& disconnect) : disconnect_function(disconnect) {
+	explicit connection(std::function<void()> function) : disconnect_function(std::move(function)) {
 	}
 
 public:
@@ -51,7 +52,7 @@ public:
 	scoped_connection(scoped_connection const&) = delete;
 	scoped_connection(scoped_connection&&) noexcept = default;
 
-	scoped_connection(connection const& other) : connect(other) {
+	explicit scoped_connection(connection other) : connect(std::move(other)) {
 	}
 
 	~scoped_connection() {

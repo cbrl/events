@@ -31,7 +31,7 @@ namespace detail {
  * @tparam ResultsT...  The completion parameters of the operations
  */
 template<typename... ResultsT, typename Operations, typename CompletionToken>
-auto parallel_publish(auto default_executor, Operations&& operations, CompletionToken&& completion) {
+auto parallel_publish(auto default_executor, Operations&& operations, CompletionToken&& completion_token) {
 	using completion_type = std::conditional_t<
 		std::conjunction_v<std::is_same<void, ResultsT>...>,
 		void(),
@@ -39,7 +39,7 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 	>;
 
 	return boost::asio::async_initiate<CompletionToken, completion_type>(
-		[&default_executor, ops = std::forward<Operations>(operations)](auto&& completion_handler) mutable {
+		[&default_executor, ops = std::forward<Operations>(operations)](auto completion_handler) mutable {
 			if (ops.empty()) {
 			    auto completion_ex = boost::asio::get_associated_executor(completion_handler, default_executor);
 
@@ -60,7 +60,8 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 					std::move(ops)
 				).async_wait(
 					boost::asio::experimental::wait_for_all{},
-					[handler = std::move(completion_handler)](std::vector<size_t> /*completion_order*/, auto... results) mutable {
+					//NOLINTNEXTLINE(performance-unnecessary-value-param)
+					[handler = std::move(completion_handler)](std::vector<size_t> /*completion_order*/, [[maybe_unused]] auto... results) mutable {
 						if constexpr ((std::same_as<void, ResultsT> && ...)) {
 							std::move(handler)();
 						}
@@ -71,7 +72,7 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 				);
 			}
 		},
-		completion
+		completion_token
 	);
 }
 } //namespace detail
@@ -97,7 +98,7 @@ class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::dro
 	using container_type = plf::colony<std::function<ReturnT(ArgsT...)>>;
 
 	struct passkey {
-		explicit passkey() {}
+		explicit passkey() = default;
 	};
 
 public:
@@ -105,12 +106,20 @@ public:
 
 	using function_type = ReturnT(ArgsT...);
 
-	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor const& exec) : executor(exec) {
+	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec) : executor(std::move(exec)) {
 	}
 
 	template<typename ExecutionContext>
 	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& exec) : executor(exec.get_executor()) {
 	}
+
+	async_signal_handler(async_signal_handler const&) = delete;
+	async_signal_handler(async_signal_handler&&) noexcept = default;
+
+	~async_signal_handler() = default;
+
+	auto operator=(async_signal_handler const&) -> async_signal_handler& = delete;
+	auto operator=(async_signal_handler&&) noexcept -> async_signal_handler& = default;
 
 	/// Create an instance of an async_signal_handler
 	template<typename... ConstructorArgsT>
@@ -233,12 +242,12 @@ public:
 					if constexpr (std::same_as<void, ReturnT>) {
 						std::apply(*ptr, args);
 						release_callback(ptr);
-						return boost::asio::deferred.values(std::monostate{}); //needs to return something, void return won't work
+						return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
 					}
 					else {
 						auto result = std::apply(*ptr, args);
 						release_callback(ptr);
-						return boost::asio::deferred.values(std::move(result));
+						return boost::asio::deferred_t::values(std::move(result));
 					}
 				})
 			);
@@ -354,13 +363,13 @@ class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::con
 	using completion_type = std::conditional_t<std::is_same_v<void, ReturnT>, void(), void(std::vector<ReturnT>)>;
 
 	struct passkey {
-		explicit passkey() {}
+		explicit passkey() = default;
 	};
 
 public:
 	using function_type = ReturnT(ArgsT...);
 
-	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor const& exec) : executor(exec) {
+	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec) : executor(std::move(exec)) {
 	}
 
 	template<typename ExecutionContext>
@@ -474,11 +483,11 @@ public:
 				boost::asio::deferred([callback_ptr, &args = *args_tuple]() mutable {
 					if constexpr (std::same_as<void, ReturnT>) {
 						std::apply(*callback_ptr, args);
-						return boost::asio::deferred.values(std::monostate{}); //needs to return something, void return won't work
+						return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
 					}
 					else {
 						auto result = std::apply(*callback_ptr, args);
-						return boost::asio::deferred.values(std::move(result));
+						return boost::asio::deferred_t::values(std::move(result));
 					}
 				})
 			);

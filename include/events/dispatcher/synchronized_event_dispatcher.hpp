@@ -23,7 +23,15 @@ class synchronized_discrete_event_dispatcher;
 template<>
 class [[nodiscard]] synchronized_discrete_event_dispatcher<void> {
 public:
+	synchronized_discrete_event_dispatcher() = default;
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher const&) = delete;
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&&) noexcept = default;
+
 	virtual ~synchronized_discrete_event_dispatcher() = default;
+
+	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
+	auto operator=(synchronized_discrete_event_dispatcher&&) noexcept ->synchronized_discrete_event_dispatcher& = default;
+
 	virtual auto dispatch() -> void = 0;
 	virtual auto clear() -> void = 0;
 	virtual auto size() -> size_t = 0;
@@ -212,6 +220,7 @@ public:
 	 * @return The number of events of this type that are in the queue
 	 */
 	template<typename EventT>
+	[[nodiscard]]
 	auto queue_size() const -> size_t {
 		auto const key = std::type_index{typeid(EventT)};
 

@@ -27,7 +27,15 @@ class async_discrete_event_dispatcher;
 template<typename CallbackPolicyT>
 class [[nodiscard]] async_discrete_event_dispatcher<void, CallbackPolicyT> {
 public:
+	async_discrete_event_dispatcher() = default;
+	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
+	async_discrete_event_dispatcher(async_discrete_event_dispatcher&&) noexcept = default;
+
 	virtual ~async_discrete_event_dispatcher() = default;
+
+	auto operator=(async_discrete_event_dispatcher const&) -> async_discrete_event_dispatcher& = delete;
+	auto operator=(async_discrete_event_dispatcher&&) noexcept -> async_discrete_event_dispatcher& = default;
+
 	virtual auto dispatch() -> void = 0;
 	virtual auto async_dispatch() -> void = 0;
 	virtual auto async_dispatch(boost::asio::any_completion_handler<void()> handler) -> void = 0;
@@ -41,9 +49,17 @@ class [[nodiscard]] async_discrete_event_dispatcher final : public async_discret
 	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT>;
 
 public:
-	async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec) {
-		handler = signal_handler_type::create(exec);
+	explicit async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec) :
+		handler(signal_handler_type::create(exec)) {
 	}
+
+	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
+	async_discrete_event_dispatcher(async_discrete_event_dispatcher&&) noexcept = default;
+
+	~async_discrete_event_dispatcher() override = default;
+
+	auto operator=(async_discrete_event_dispatcher const&) -> async_discrete_event_dispatcher& = delete;
+	auto operator=(async_discrete_event_dispatcher&&) noexcept -> async_discrete_event_dispatcher& = default;
 
 	template<std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
@@ -172,12 +188,20 @@ class [[nodiscard]] async_event_dispatcher {
 	using dispatcher_type = detail::async_discrete_event_dispatcher<T, CallbackPolicyT>;
 
 public:
-	async_event_dispatcher(boost::asio::any_io_executor const& exec) : executor(exec) {
+	explicit async_event_dispatcher(boost::asio::any_io_executor exec) : executor(std::move(exec)) {
 	}
 
 	template<typename ExecutionContext>
-	async_event_dispatcher(ExecutionContext& exec) : executor(exec.get_executor()) {
+	explicit async_event_dispatcher(ExecutionContext& exec) : executor(exec.get_executor()) {
 	}
+
+	async_event_dispatcher(async_event_dispatcher const&) = delete;
+	async_event_dispatcher(async_event_dispatcher&&) noexcept = default;
+
+	~async_event_dispatcher() = default;
+
+	auto operator=(async_event_dispatcher const&) -> async_event_dispatcher& = delete;
+	auto operator=(async_event_dispatcher&&) noexcept -> async_event_dispatcher& = default;
 
 	/**
 	 * @brief Register a callback function that will be invoked when an event of the specified type is published
@@ -281,7 +305,7 @@ public:
 	template<typename EventT, boost::asio::completion_token_for<void()> CompletionToken>
 	auto async_send(EventT const& event, CompletionToken&& completion) {
 		return boost::asio::async_initiate<CompletionToken, void()>(
-			[&](auto&& handler) mutable {
+			[&](auto handler) mutable {
 				get_or_create_dispatcher<EventT>().async_send(event, std::move(handler));
 			},
 			completion
@@ -305,7 +329,7 @@ public:
 	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT> && boost::asio::completion_token_for<CompletionToken, void()>
 	auto async_send(RangeT const& range, CompletionToken&& completion) -> void {
 		return boost::asio::async_initiate<CompletionToken, void()>(
-			[&](auto&& handler) mutable {
+			[&](auto handler) mutable {
 				get_or_create_dispatcher<EventT>().async_send(range, std::move(handler));
 			},
 			completion
@@ -347,7 +371,7 @@ public:
 
 		auto initiate = [](dispatcher_type<void>& dispatcher) {
 			return boost::asio::async_initiate<decltype(boost::asio::deferred), void()>(
-				[&dispatcher](auto&& handler) mutable {
+				[&dispatcher](auto handler) mutable {
 					dispatcher.async_dispatch(std::move(handler));
 				},
 				boost::asio::deferred
@@ -373,6 +397,7 @@ public:
 	 * @return The number of events of this type that are in the queue
 	 */
 	template<typename EventT>
+	[[nodiscard]]
 	auto queue_size() const -> size_t {
 		auto const key = std::type_index{typeid(EventT)};
 
