@@ -42,7 +42,8 @@ public:
 	 *
 	 * @param args The signal arguments
 	 */
-	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT> {
+	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT>
+	{
 		for (auto& callback : callbacks) {
 			callback(args...);
 		}
@@ -55,7 +56,8 @@ public:
 	 *
 	 * @return The callback results
 	 */
-	auto publish(ArgsT... args) -> std::vector<ReturnT> requires (!std::same_as<void, ReturnT>) {
+	auto publish(ArgsT... args) -> std::vector<ReturnT> requires(!std::same_as<void, ReturnT>)
+	{
 		auto results = std::vector<ReturnT>{};
 		results.reserve(callbacks.size());
 
@@ -70,10 +72,12 @@ public:
 	 * @brief Fire the signal as a lazily evaluated range
 	 * @return A lazily evaluated range, of which each element will be the result of invoking a callback.
 	 */
-	auto publish_range(ArgsT... args) requires (!std::same_as<void, ReturnT>) {
-		return callbacks | std::views::transform([...args = std::forward<ArgsT>(args)](auto& callback) mutable -> ReturnT {
-			return callback(args...);
-		});
+	auto publish_range(ArgsT... args) requires(!std::same_as<void, ReturnT>)
+	{
+		return callbacks
+		    | std::views::transform([... args = std::forward<ArgsT>(args)](auto& callback) mutable -> ReturnT {
+			       return callback(args...);
+		       });
 	}
 
 	/// Disconnect all callbacks
@@ -89,4 +93,4 @@ private:
 	container_type callbacks;
 };
 
-} //namespace events
+}  //namespace events

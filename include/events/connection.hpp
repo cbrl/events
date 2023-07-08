@@ -29,8 +29,7 @@ public:
 	auto operator=(connection const&) -> connection& = default;
 	auto operator=(connection&&) noexcept -> connection& = default;
 
-	[[nodiscard]]
-	explicit operator bool() const noexcept {
+	[[nodiscard]] explicit operator bool() const noexcept {
 		return static_cast<bool>(disconnect_function);
 	}
 
@@ -67,8 +66,7 @@ public:
 		return *this;
 	}
 
-	[[nodiscard]]
-	explicit operator bool() const noexcept {
+	[[nodiscard]] explicit operator bool() const noexcept {
 		return static_cast<bool>(connect);
 	}
 
@@ -80,4 +78,4 @@ private:
 	connection connect;
 };
 
-} //namespace events
+}  //namespace events

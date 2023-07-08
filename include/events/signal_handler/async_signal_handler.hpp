@@ -44,45 +44,43 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 		if (ops.empty()) {
 			auto completion_ex = boost::asio::get_associated_executor(completion_handler, default_executor);
 
-			boost::asio::post(
-				completion_ex,
-				[handler = std::move(completion_handler)]() mutable {
-					if constexpr ((std::same_as<void, ResultsT> && ...)) {
-						std::move(handler)();
-					}
-					else {
-						std::move(handler)(std::vector<ResultsT>{}...);
-					}
+			boost::asio::post(completion_ex, [handler = std::move(completion_handler)]() mutable {
+				if constexpr ((std::same_as<void, ResultsT> && ...)) {
+					std::move(handler)();
 				}
-			);
+				else {
+					std::move(handler)(std::vector<ResultsT>{}...);
+				}
+			});
 		}
 		else {
-			boost::asio::experimental::make_parallel_group(
-				std::move(ops)
-			).async_wait(
-				boost::asio::experimental::wait_for_all{},
-				//NOLINTNEXTLINE(performance-unnecessary-value-param)
-				[handler = std::move(completion_handler)](std::vector<size_t> /*completion_order*/, [[maybe_unused]] auto... results) mutable {
-					if constexpr ((std::same_as<void, ResultsT> && ...)) {
-						std::move(handler)();
-					}
-					else {
-						std::move(handler)(std::move(results)...);
-					}
-				}
-			);
+			boost::asio::experimental::make_parallel_group(std::move(ops))
+			    .async_wait(
+			        boost::asio::experimental::wait_for_all{},
+			        //NOLINTNEXTLINE(performance-unnecessary-value-param)
+			        [handler = std::move(completion_handler
+			         )](std::vector<size_t> /*completion_order*/, [[maybe_unused]] auto... results) mutable {
+				        if constexpr ((std::same_as<void, ResultsT> && ...)) {
+					        std::move(handler)();
+				        }
+				        else {
+					        std::move(handler)(std::move(results)...);
+				        }
+			        }
+			    );
 		}
 	};
 
 	return boost::asio::async_initiate<CompletionToken, completion_type>(std::move(initiation), completion_token);
 }
-} //namespace detail
+}  //namespace detail
 
 
 /// Defines the how a callback is handled when a signal is fired while the callback is still executing
 struct callback_policy {
 	struct drop {};  ///< The callback will drop the signal if it hasn't finished processing the last signal
-	struct concurrent {};  ///< The callback will be launched regardless of whether it has finished processing the last signal
+	struct concurrent {
+	};  ///< The callback will be launched regardless of whether it has finished processing the last signal
 };
 
 
@@ -95,7 +93,8 @@ class async_signal_handler;
  *        published will drop the signal.
  */
 template<typename ReturnT, typename... ArgsT>
-class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::drop> : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>> {
+class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>
+    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>> {
 	using container_type = plf::colony<std::function<ReturnT(ArgsT...)>>;
 
 	struct passkey {
@@ -125,8 +124,11 @@ public:
 	/// Create an instance of an async_signal_handler
 	template<typename... ConstructorArgsT>
 	[[nodiscard]]
-	static auto create(ConstructorArgsT&&... args) -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>> {
-		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>>(passkey{}, std::forward<ConstructorArgsT>(args)...);
+	static auto create(ConstructorArgsT&&... args)
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>> {
+		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>>(
+		    passkey{}, std::forward<ConstructorArgsT>(args)...
+		);
 	}
 
 	/// Get the executor associated with this object
@@ -167,7 +169,8 @@ public:
 	 *
 	 * @param args The signal arguments
 	 */
-	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT> {
+	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT>
+	{
 		auto pending_callbacks = prune_callbacks_and_get_pending();
 
 		for (auto ptr : pending_callbacks) {
@@ -183,7 +186,8 @@ public:
 	 *
 	 * @return The callback results
 	 */
-	auto publish(ArgsT... args) -> std::vector<ReturnT> requires (!std::same_as<void, ReturnT>) {
+	auto publish(ArgsT... args) -> std::vector<ReturnT> requires(!std::same_as<void, ReturnT>)
+	{
 		auto pending_callbacks = prune_callbacks_and_get_pending();
 
 		auto results = std::vector<ReturnT>{};
@@ -212,12 +216,9 @@ public:
 		auto const pending_callbacks = prune_callbacks_and_get_pending();
 
 		for (auto ptr : pending_callbacks) {
-			boost::asio::post(
-				executor,
-				[self = this->shared_from_this(), ptr, args_tuple]() mutable {
-					(void)std::apply(*ptr, *args_tuple);
-				}
-			);
+			boost::asio::post(executor, [self = this->shared_from_this(), ptr, args_tuple]() mutable {
+				(void)std::apply(*ptr, *args_tuple);
+			});
 		}
 	}
 
@@ -241,7 +242,7 @@ public:
 				if constexpr (std::same_as<void, ReturnT>) {
 					std::apply(*ptr, args);
 					release_callback(ptr);
-					return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
+					return boost::asio::deferred_t::values(std::monostate{});  //needs to return a value
 				}
 				else {
 					auto result = std::apply(*ptr, args);
@@ -264,8 +265,10 @@ public:
 
 		// Keep this signal handler and the arguments alive until the completion token has been called (when all
 		// callbacks have completed).
-		auto consigned = boost::asio::consign(std::forward<CompletionToken>(completion), this->shared_from_this(), std::move(args_tuple));
-		
+		auto consigned = boost::asio::consign(
+		    std::forward<CompletionToken>(completion), this->shared_from_this(), std::move(args_tuple)
+		);
+
 		// Initiate the callbacks as a parallel_group, with a completion that takes either nothing if ReturnT is void,
 		// or a vector of the callback results otherwise.
 		return detail::parallel_publish<ReturnT>(executor, std::move(operations), std::move(consigned));
@@ -287,7 +290,7 @@ private:
 	auto prune_callbacks_and_get_pending() -> std::vector<typename container_type::pointer> {
 		// This will be populated with the callbacks that need to be executed
 		auto pending_callbacks = std::vector<typename container_type::pointer>{};
-		pending_callbacks.reserve(callbacks.size() - working_callbacks.size()); //reserve an estimate of the final size
+		pending_callbacks.reserve(callbacks.size() - working_callbacks.size());  //reserve an estimate of the final size
 
 		auto working_lock = std::scoped_lock{callback_mut, working_callback_mut};
 
@@ -316,11 +319,9 @@ private:
 		auto lock = std::scoped_lock{to_remove_mut};
 
 		// Move all handles whose callbacks aren't currently executing to the end of the vector
-		auto const remove_begin = std::partition(
-			to_remove.begin(),
-			to_remove.end(),
-			[&](auto pointer) { return working_callbacks[pointer]; }
-		);
+		auto const remove_begin = std::partition(to_remove.begin(), to_remove.end(), [&](auto pointer) {
+			return working_callbacks[pointer];
+		});
 
 		// Erase all callbacks that aren't in progress
 		for (auto it = remove_begin; it != to_remove.end(); ++it) {
@@ -352,13 +353,13 @@ private:
 };
 
 
-
 /**
  * @brief A signal handler that invokes callbacks asynchronously. Callbacks that don't finish before a new signal is
  *        published will still be invoked.
  */
 template<typename ReturnT, typename... ArgsT>
-class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent> : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>> {
+class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>
+    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>> {
 	using container_type = plf::colony<std::shared_ptr<std::function<ReturnT(ArgsT...)>>>;
 	using completion_type = std::conditional_t<std::is_same_v<void, ReturnT>, void(), void(std::vector<ReturnT>)>;
 
@@ -379,8 +380,11 @@ public:
 	/// Create an instance of an async_signal_handler
 	template<typename... ConstructorArgsT>
 	[[nodiscard]]
-	static auto create(ConstructorArgsT&&... args) -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>> {
-		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>>(passkey{}, std::forward<ConstructorArgsT>(args)...);
+	static auto create(ConstructorArgsT&&... args)
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>> {
+		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>>(
+		    passkey{}, std::forward<ConstructorArgsT>(args)...
+		);
 	}
 
 	/// Get the executor associated with this object
@@ -416,7 +420,8 @@ public:
 	 *
 	 * @param args The signal arguments
 	 */
-	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT> {
+	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT>
+	{
 		auto lock = std::shared_lock{callback_mut};
 
 		for (auto& callback_ptr : callbacks) {
@@ -431,7 +436,8 @@ public:
 	 *
 	 * @return The callback results
 	 */
-	auto publish(ArgsT... args) -> std::vector<ReturnT> requires (!std::same_as<void, ReturnT>) {
+	auto publish(ArgsT... args) -> std::vector<ReturnT> requires(!std::same_as<void, ReturnT>)
+	{
 		auto lock = std::shared_lock{callback_mut};
 
 		auto results = std::vector<ReturnT>{};
@@ -455,12 +461,9 @@ public:
 		auto lock = std::shared_lock{callback_mut};
 
 		for (auto& callback_ptr : callbacks) {
-			boost::asio::post(
-				executor,
-				[self = this->shared_from_this(), callback_ptr, args_tuple]() mutable {
-					(void)std::apply(*callback_ptr, args_tuple);
-				}
-			);
+			boost::asio::post(executor, [self = this->shared_from_this(), callback_ptr, args_tuple]() mutable {
+				(void)std::apply(*callback_ptr, args_tuple);
+			});
 		}
 	}
 
@@ -481,7 +484,7 @@ public:
 			auto execute = [callback_ptr, &args = *args_tuple]() mutable {
 				if constexpr (std::same_as<void, ReturnT>) {
 					std::apply(*callback_ptr, args);
-					return boost::asio::deferred_t::values(std::monostate{}); //needs to return something, void return won't work
+					return boost::asio::deferred_t::values(std::monostate{});  //needs to return a value
 				}
 				else {
 					auto result = std::apply(*callback_ptr, args);
@@ -505,7 +508,9 @@ public:
 
 		// Keep this signal handler and the arguments alive until the completion token has been called (when all
 		// callbacks have completed).
-		auto consigned = boost::asio::consign(std::forward<CompletionToken>(completion), this->shared_from_this(), std::move(args_tuple));
+		auto consigned = boost::asio::consign(
+		    std::forward<CompletionToken>(completion), this->shared_from_this(), std::move(args_tuple)
+		);
 
 		// Initiate the callbacks as a parallel_group, with a completion that takes either nothing if ReturnT is void,
 		// or a vector of the callback results otherwise.
@@ -525,4 +530,4 @@ private:
 	std::shared_mutex callback_mut;
 };
 
-} //namespace events
+}  //namespace events

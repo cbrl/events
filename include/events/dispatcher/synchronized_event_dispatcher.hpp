@@ -30,7 +30,8 @@ public:
 	virtual ~synchronized_discrete_event_dispatcher() = default;
 
 	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
-	auto operator=(synchronized_discrete_event_dispatcher&&) noexcept ->synchronized_discrete_event_dispatcher& = default;
+	auto operator=(synchronized_discrete_event_dispatcher&&) noexcept
+	    -> synchronized_discrete_event_dispatcher& = default;
 
 	virtual auto dispatch() -> void = 0;
 	virtual auto clear() -> void = 0;
@@ -100,11 +101,11 @@ private:
 	std::mutex events_mut;
 };
 
-} //namespace detail
+}  //namespace detail
 
 
 /**
- * @brief A thread-safe @ref event_dispatcher 
+ * @brief A thread-safe @ref event_dispatcher
  */
 class [[nodiscard]] synchronized_event_dispatcher {
 public:
@@ -178,7 +179,7 @@ public:
 
 	/**
 	 * @brief Send an event immediately
-	 * 
+	 *
 	 * @tparam EventT  The type of event to send
 	 * @tparam ArgsT
 	 *
@@ -243,7 +244,6 @@ private:
 			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
 				return static_cast<detail::synchronized_discrete_event_dispatcher<EventT>&>(*(it->second));
 			}
-
 		}
 
 		// If the dispatcher didn't exist, then acquire an exclusive lock and create it.
@@ -264,4 +264,4 @@ private:
 	std::shared_mutex dispatcher_mut;
 };
 
-} //namespace events
+}  //namespace events

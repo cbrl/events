@@ -48,7 +48,8 @@ public:
 	 *
 	 * @param args The signal arguments
 	 */
-	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT> {
+	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT>
+	{
 		erase_expired_callbacks();
 
 		auto lock = std::shared_lock{callback_mut};
@@ -64,7 +65,8 @@ public:
 	 *
 	 * @return The callback results
 	 */
-	auto publish(ArgsT... args) -> std::vector<ReturnT> requires (!std::same_as<void, ReturnT>) {
+	auto publish(ArgsT... args) -> std::vector<ReturnT> requires(!std::same_as<void, ReturnT>)
+	{
 		erase_expired_callbacks();
 
 		auto lock = std::shared_lock{callback_mut};
@@ -109,4 +111,4 @@ private:
 	std::mutex erase_mut;
 };
 
-} //namespace events
+}  //namespace events

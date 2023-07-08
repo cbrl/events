@@ -45,12 +45,13 @@ public:
 
 
 template<typename EventT, typename CallbackPolicyT>
-class [[nodiscard]] async_discrete_event_dispatcher final : public async_discrete_event_dispatcher<void, CallbackPolicyT> {
+class [[nodiscard]] async_discrete_event_dispatcher final
+    : public async_discrete_event_dispatcher<void, CallbackPolicyT> {
 	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT>;
 
 public:
 	explicit async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec) :
-		handler(signal_handler_type::create(exec)) {
+	    handler(signal_handler_type::create(exec)) {
 	}
 
 	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
@@ -97,10 +98,8 @@ public:
 		lock.unlock();
 
 		return parallel_publish(
-			std::span{*to_publish},
-			[user_completion = std::move(completion), to_publish](auto&&...) mutable {
-				std::move(user_completion)();
-			}
+		    std::span{*to_publish},
+		    [user_completion = std::move(completion), to_publish](auto&&...) mutable { std::move(user_completion)(); }
 		);
 	}
 
@@ -158,7 +157,9 @@ private:
 	// Publish a set of events using a parallel_group with a single completion that is invoked when all callbacks finish
 	template<std::convertible_to<EventT> U, boost::asio::completion_token_for<void()> CompletionToken>
 	auto parallel_publish(std::span<U> to_publish, CompletionToken&& completion) {
-		auto operations = std::vector<decltype(handler->async_publish(std::declval<EventT>(), boost::asio::deferred))>{};
+		using op_type = decltype(handler->async_publish(std::declval<EventT>(), boost::asio::deferred));
+
+		auto operations = std::vector<op_type>{};
 		operations.reserve(to_publish.size());
 
 		for (auto&& event : to_publish) {
@@ -166,7 +167,9 @@ private:
 		}
 
 		auto default_exec = handler->get_executor();
-		return detail::parallel_publish<void>(default_exec, std::move(operations), std::forward<CompletionToken>(completion));
+		return detail::parallel_publish<void>(
+		    default_exec, std::move(operations), std::forward<CompletionToken>(completion)
+		);
 	}
 
 
@@ -176,7 +179,7 @@ private:
 	std::mutex events_mut;
 };
 
-} //namespace detail
+}  //namespace detail
 
 
 /**
@@ -305,10 +308,8 @@ public:
 	template<typename EventT, boost::asio::completion_token_for<void()> CompletionToken>
 	auto async_send(EventT const& event, CompletionToken&& completion) {
 		return boost::asio::async_initiate<CompletionToken, void()>(
-			[&](auto handler) mutable {
-				get_or_create_dispatcher<EventT>().async_send(event, std::move(handler));
-			},
-			completion
+		    [&](auto handler) mutable { get_or_create_dispatcher<EventT>().async_send(event, std::move(handler)); },
+		    completion
 		);
 	}
 
@@ -326,13 +327,12 @@ public:
 	 * @param completion  The completion token that will be invoked when all callbacks have completed
 	 */
 	template<typename EventT, std::ranges::range RangeT, typename CompletionToken>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT> && boost::asio::completion_token_for<CompletionToken, void()>
+	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	    && boost::asio::completion_token_for<CompletionToken, void()>
 	auto async_send(RangeT const& range, CompletionToken&& completion) -> void {
 		return boost::asio::async_initiate<CompletionToken, void()>(
-			[&](auto handler) mutable {
-				get_or_create_dispatcher<EventT>().async_send(range, std::move(handler));
-			},
-			completion
+		    [&](auto handler) mutable { get_or_create_dispatcher<EventT>().async_send(range, std::move(handler)); },
+		    completion
 		);
 	}
 
@@ -371,10 +371,8 @@ public:
 
 		auto initiate = [](dispatcher_type<void>& dispatcher) {
 			return boost::asio::async_initiate<decltype(boost::asio::deferred), void()>(
-				[&dispatcher](auto handler) mutable {
-					dispatcher.async_dispatch(std::move(handler));
-				},
-				boost::asio::deferred
+			    [&dispatcher](auto handler) mutable { dispatcher.async_dispatch(std::move(handler)); },
+			    boost::asio::deferred
 			);
 		};
 
@@ -386,7 +384,9 @@ public:
 			operations.emplace_back(initiate(*dispatcher));
 		}
 
-		return detail::parallel_publish<void>(executor, std::move(operations), std::forward<CompletionToken>(completion));
+		return detail::parallel_publish<void>(
+		    executor, std::move(operations), std::forward<CompletionToken>(completion)
+		);
 	}
 
 	/**
@@ -420,7 +420,6 @@ private:
 			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
 				return static_cast<dispatcher_type<EventT>&>(*(it->second));
 			}
-
 		}
 
 		// If the dispatcher didn't exist, then acquire an exclusive lock and create it.
@@ -443,4 +442,4 @@ private:
 	std::shared_mutex dispatcher_mut;
 };
 
-} //namespace events
+}  //namespace events

@@ -91,7 +91,7 @@ private:
 	std::vector<EventT> events;
 };
 
-} //namespace detail
+}  //namespace detail
 
 
 /**
@@ -157,7 +157,7 @@ public:
 
 	/**
 	 * @brief Send an event immediately
-	 * 
+	 *
 	 * @tparam EventT  The type of event to send
 	 *
 	 * @param args  An instance of the event to send
@@ -169,7 +169,7 @@ public:
 
 	/**
 	 * @brief Send an event immediately
-	 * 
+	 *
 	 * @tparam EventT  The type of event to send
 	 * @tparam ArgsT
 	 *
@@ -236,4 +236,4 @@ private:
 	std::map<std::type_index, std::unique_ptr<detail::discrete_event_dispatcher<>>> dispatchers;
 };
 
-} //namespace events
+}  //namespace events

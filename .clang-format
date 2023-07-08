@@ -94,7 +94,6 @@ InsertTrailingCommas: Wrapped
 IntegerLiteralSeparator:
   Binary: 0
   Decimal: 3
-  DecimalMinDigits: 7
   Hex: -1
 JavaScriptQuotes: Double
 JavaScriptWrapImports: true
@@ -153,7 +152,7 @@ RawStringFormats:
 ReferenceAlignment: Pointer
 ReflowComments: true
 RequiresClausePosition: WithPreceding
-SeparateDefinitionBlocks: Always
+SeparateDefinitionBlocks: Leave
 ShortNamespaceLines: 4
 SortIncludes: false
 SortUsingDeclarations: true
