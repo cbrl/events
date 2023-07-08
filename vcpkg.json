@@ -1,0 +1,8 @@
+{
+  "name": "events",
+  "version-semver": "0.1.0",
+  "dependencies": [
+    "boost-asio",
+	"plf-colony"
+  ]
+}

@@ -1,0 +1,138 @@
+#include <events/dispatcher/event_dispatcher.hpp>
+#include <events/dispatcher/synchronized_event_dispatcher.hpp>
+#include <events/dispatcher/async_event_dispatcher.hpp>
+
+#include <chrono>
+#include <format>
+#include <iostream>
+#include <numeric>
+#include <thread>
+
+
+template<size_t ThreadCount>
+auto threaded_test_impl(auto&& function) -> std::pair<std::chrono::steady_clock::duration, std::chrono::steady_clock::duration> {
+	using namespace std::chrono;
+
+	auto threads = std::array<std::thread, ThreadCount>{};
+	auto enqueue_times = std::array<steady_clock::duration, ThreadCount>{};
+	auto dispatch_times = std::array<steady_clock::duration, ThreadCount>{};
+
+	for (size_t i = 0; i < ThreadCount; ++i) {
+		threads[i] = std::thread{[&, i] {
+			function(enqueue_times[i], dispatch_times[i]);
+		}};
+	}
+
+	for (auto& thread : threads) {
+		thread.join();
+	}
+
+	return {
+		std::accumulate(enqueue_times.begin(), enqueue_times.end(), steady_clock::duration{}),
+		std::accumulate(dispatch_times.begin(), dispatch_times.end(), steady_clock::duration{})
+	};
+}
+
+template<size_t EventCount, size_t ThreadCount>
+auto threaded_test(auto& dispatcher) -> void {
+	using namespace std::chrono;
+
+	std::cout << std::format("{}: {} events on {} threads\n", typeid(dispatcher).name(), EventCount, ThreadCount);
+
+	auto count = std::make_shared<std::atomic_size_t>(0ull);
+
+	auto handle = events::scoped_connection{dispatcher.connect<int>([count](int) {
+		++(*count);
+	})};
+
+	auto const [bulk_enqueue_time, bulk_dispatch_time] = threaded_test_impl<ThreadCount>(
+		[&](steady_clock::duration& enqueue_time, steady_clock::duration& dispatch_time) {
+			auto const enqueue_begin = steady_clock::now();
+			for (int n = 0; n < EventCount; ++n) {
+				dispatcher.enqueue<int>(0);
+			}
+			auto const enqueue_end = steady_clock::now();
+
+			auto const dispatch_begin = steady_clock::now();
+			if constexpr (requires { dispatcher.async_dispatch(); }) {
+			    //dispatcher.async_dispatch(boost::asio::use_future).get();
+			    dispatcher.async_dispatch();
+			}
+			else {
+				dispatcher.dispatch();
+			}
+			auto const dispatch_end = steady_clock::now();
+
+			enqueue_time = enqueue_end - enqueue_begin;
+			dispatch_time = dispatch_end - dispatch_begin;
+		}
+	);
+
+	std::cout << std::format("    bulk dispatch {} of {}: {}\n", count->load(), ThreadCount * EventCount, duration_cast<milliseconds>(bulk_enqueue_time + bulk_dispatch_time));
+	std::cout << std::format("        enqueue:  {}\n", duration_cast<milliseconds>(bulk_enqueue_time));
+	std::cout << std::format("        dispatch: {}\n", duration_cast<milliseconds>(bulk_dispatch_time));
+
+	*count = 0;
+	auto const [single_enqueue_time, single_dispatch_time] = threaded_test_impl<ThreadCount>(
+		[&](steady_clock::duration& enqueue_time, steady_clock::duration& dispatch_time) {
+			for (int n = 0; n < EventCount; ++n) {
+				auto const enqueue_begin = steady_clock::now();
+				dispatcher.enqueue<int>(0);
+				auto const enqueue_end = steady_clock::now();
+				enqueue_time += enqueue_end - enqueue_begin;
+
+				auto const dispatch_begin = steady_clock::now();
+				dispatcher.dispatch();
+				auto const dispatch_end = steady_clock::now();
+				dispatch_time += dispatch_end - dispatch_begin;
+			}
+		}
+	);
+
+	std::cout << std::format("    single dispatch {} of {}: {}\n", count->load(), ThreadCount * EventCount, duration_cast<milliseconds>(single_enqueue_time + single_dispatch_time));
+	std::cout << std::format("        enqueue:  {}\n", duration_cast<milliseconds>(single_enqueue_time));
+	std::cout << std::format("        dispatch: {}\n", duration_cast<milliseconds>(single_dispatch_time));
+}
+
+auto main() -> int {
+	auto ctx = boost::asio::io_context{};
+
+	auto threads = std::array<std::jthread, 3>{};
+	for (auto& thread : threads) {
+		thread = std::jthread{[&ctx](std::stop_token stop) {
+			auto work = boost::asio::make_work_guard(ctx);
+
+			auto on_stop = std::stop_callback{stop, [&work] { work.reset(); }};
+
+			while (!stop.stop_requested()) {
+				try {
+					if (ctx.run_one() == 0) {
+						std::this_thread::yield();
+					}
+				}
+				catch (std::exception const& e) {
+					(void)e;
+				}
+			}
+		}};
+	}
+
+	auto dispatcher = events::event_dispatcher{};
+	auto sync_dispatcher = events::synchronized_event_dispatcher{};
+	auto async_dispatcher = events::async_event_dispatcher{ctx};
+	auto async_drop_dispatcher = events::async_event_dispatcher<events::callback_policy::drop>{ctx};
+
+	threaded_test<500'000, 1>(dispatcher);
+	threaded_test<100'000, 5>(sync_dispatcher);
+	threaded_test<100'000, 5>(async_dispatcher);
+	threaded_test<100'000, 5>(async_drop_dispatcher);
+
+	for (auto& thread : threads) {
+		thread.request_stop();
+	}
+	for (auto& thread : threads) {
+		thread.join();
+	}
+
+	return 0;
+}
