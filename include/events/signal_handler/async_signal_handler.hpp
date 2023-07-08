@@ -32,48 +32,49 @@ namespace detail {
  */
 template<typename... ResultsT, typename Operations, typename CompletionToken>
 auto parallel_publish(auto default_executor, Operations&& operations, CompletionToken&& completion_token) {
+	// clang-format off
 	using completion_type = std::conditional_t<
 		std::conjunction_v<std::is_same<void, ResultsT>...>,
 		void(),
 		void(std::vector<ResultsT>...)
 	>;
+	// clang-format on
 
-	return boost::asio::async_initiate<CompletionToken, completion_type>(
-		[&default_executor, ops = std::forward<Operations>(operations)](auto completion_handler) mutable {
-			if (ops.empty()) {
-			    auto completion_ex = boost::asio::get_associated_executor(completion_handler, default_executor);
+	auto initiation = [&default_executor, ops = std::forward<Operations>(operations)](auto completion_handler) mutable {
+		if (ops.empty()) {
+			auto completion_ex = boost::asio::get_associated_executor(completion_handler, default_executor);
 
-				boost::asio::post(
-					completion_ex,
-					[handler = std::move(completion_handler)]() mutable {
-						if constexpr ((std::same_as<void, ResultsT> && ...)) {
-							std::move(handler)();
-						}
-						else {
-					        std::move(handler)(std::vector<ResultsT>{}...);
-						}
+			boost::asio::post(
+				completion_ex,
+				[handler = std::move(completion_handler)]() mutable {
+					if constexpr ((std::same_as<void, ResultsT> && ...)) {
+						std::move(handler)();
 					}
-				);
-			}
-			else {
-				boost::asio::experimental::make_parallel_group(
-					std::move(ops)
-				).async_wait(
-					boost::asio::experimental::wait_for_all{},
-					//NOLINTNEXTLINE(performance-unnecessary-value-param)
-					[handler = std::move(completion_handler)](std::vector<size_t> /*completion_order*/, [[maybe_unused]] auto... results) mutable {
-						if constexpr ((std::same_as<void, ResultsT> && ...)) {
-							std::move(handler)();
-						}
-						else {
-							std::move(handler)(std::move(results)...);
-						}
+					else {
+						std::move(handler)(std::vector<ResultsT>{}...);
 					}
-				);
-			}
-		},
-		completion_token
-	);
+				}
+			);
+		}
+		else {
+			boost::asio::experimental::make_parallel_group(
+				std::move(ops)
+			).async_wait(
+				boost::asio::experimental::wait_for_all{},
+				//NOLINTNEXTLINE(performance-unnecessary-value-param)
+				[handler = std::move(completion_handler)](std::vector<size_t> /*completion_order*/, [[maybe_unused]] auto... results) mutable {
+					if constexpr ((std::same_as<void, ResultsT> && ...)) {
+						std::move(handler)();
+					}
+					else {
+						std::move(handler)(std::move(results)...);
+					}
+				}
+			);
+		}
+	};
+
+	return boost::asio::async_initiate<CompletionToken, completion_type>(std::move(initiation), completion_token);
 }
 } //namespace detail
 

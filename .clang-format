@@ -45,6 +45,7 @@ BraceWrapping:
 BreakAfterAttributes: Always
 BreakBeforeBinaryOperators: NonAssignment
 BreakBeforeBraces: Custom
+BreakBeforeConceptDeclarations: Always
 BreakInheritanceList: BeforeComma
 BreakBeforeTernaryOperators: true
 BreakConstructorInitializers: AfterColon
@@ -85,6 +86,7 @@ IndentCaseLabels: true
 IndentExternBlock: NoIndent
 IndentGotoLabels: true
 IndentPPDirectives: BeforeHash
+IndentRequiresClause: false
 IndentWidth: 4
 IndentWrappedFunctionNames: false
 InsertNewlineAtEOF: true
