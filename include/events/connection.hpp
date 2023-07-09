@@ -51,7 +51,7 @@ public:
 	scoped_connection(scoped_connection const&) = delete;
 	scoped_connection(scoped_connection&&) noexcept = default;
 
-	explicit scoped_connection(connection other) : connect(std::move(other)) {
+	scoped_connection(connection other) : connect(std::move(other)) {
 	}
 
 	~scoped_connection() {
@@ -61,7 +61,7 @@ public:
 	auto operator=(scoped_connection const&) -> scoped_connection& = delete;
 	auto operator=(scoped_connection&&) noexcept -> scoped_connection& = default;
 
-	auto operator=(connection const& other) noexcept -> scoped_connection& {
+	auto operator=(connection const& other) -> scoped_connection& {
 		connect = other;
 		return *this;
 	}

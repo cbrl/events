@@ -124,7 +124,8 @@ public:
 	 */
 	template<typename EventT>
 	auto enqueue(EventT&& event) -> void {
-		get_or_create_dispatcher<EventT>().enqueue(std::forward<EventT>(event));
+		using event_type = std::remove_cvref_t<EventT>;
+		get_or_create_dispatcher<event_type>().enqueue(std::forward<EventT>(event));
 	}
 
 	/**
@@ -164,7 +165,8 @@ public:
 	 */
 	template<typename EventT>
 	auto send(EventT&& event) -> void {
-		get_or_create_dispatcher<EventT>().send(std::forward<EventT>(event));
+		using event_type = std::remove_cvref_t<EventT>;
+		get_or_create_dispatcher<event_type>().send(std::forward<EventT>(event));
 	}
 
 	/**

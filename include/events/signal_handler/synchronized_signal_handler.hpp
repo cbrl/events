@@ -8,6 +8,8 @@
 
 #include <plf_colony.h>
 
+#include <events/connection.hpp>
+
 
 namespace events {
 
