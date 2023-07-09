@@ -6,9 +6,34 @@ when that signal is fired. The `event_dispatcher` utilizes signal handlers to al
 for any user-defined event type. These events can be either enqueued for later dispatch or immediately dispatched to
 all listeners.
 
-Variants of both the `signal_handler` and `event_dispatcher` are provided for use in single-threaded
-and multi-threaded applications. Additionally, a variant of each is provided that integrates with ASIO to allow easily
-dispatching listeners to an execution context with support for ASIO's completion tokens.
+Variants of both the `signal_handler` and `event_dispatcher` are provided for use in single-threaded and multi-threaded
+applications. Additionally, a variant of each is provided that integrates with ASIO to allow easily dispatching
+listeners to an execution context with support for ASIO's completion tokens.
+
+```cpp
+auto sigh = events::signal_handler<void(int)>{};
+
+sigh.connect([](int n) {
+	std::cout << std::format("Signal received: {}\n", n);
+});
+
+sigh.publish(0);
+```
+
+```cpp
+struct EntityCreated {
+	uint64_t handle;
+};
+
+auto dispatcher = events::event_dispatcher{};
+
+dispatcher.connect<EntityCreated>([](auto const& event) {
+	std::cout << std::format("New entity: {}\n", event.handle);
+});
+
+dispatcher.enqueue(EntityCreated{0});
+dispatcher.dispatch();
+```
 
 # Building and installing
 
@@ -20,8 +45,4 @@ See the [CONTRIBUTING](CONTRIBUTING.md) document.
 
 # Licensing
 
-<!--
-Please go to https://choosealicense.com/licenses/ and choose a license that
-fits your needs. The recommended license for a project of this type is the
-Boost Software License 1.0.
--->
+[MIT License](LICENSE)
