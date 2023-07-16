@@ -28,7 +28,7 @@ auto main() -> int {
 	sigh_return.connect([](int n) { return n * 2; });
 	sigh_return.connect([](int n) { return n * 10; });
 
-	auto results = sigh.publish(5); //results == [10, 50]
+	auto results = sigh_return.publish(5); //results == [10, 50]
 
 	return 0;
 }
