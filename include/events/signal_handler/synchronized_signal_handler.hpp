@@ -13,19 +13,84 @@
 
 namespace events {
 
-template<typename...>
+template<typename FunctionT, typename AllocatorT = std::allocator<void>>
 class synchronized_signal_handler;
 
 
 /**
  * @brief A thread-safe @ref signal_handler
  */
-template<typename ReturnT, typename... ArgsT>
-class [[nodiscard]] synchronized_signal_handler<ReturnT(ArgsT...)> {
-	using container_type = plf::colony<std::function<ReturnT(ArgsT...)>>;
-
+template<typename ReturnT, typename... ArgsT, typename AllocatorT>
+class [[nodiscard]] synchronized_signal_handler<ReturnT(ArgsT...), AllocatorT> {
 public:
 	using function_type = ReturnT(ArgsT...);
+	using allocator_type = AllocatorT;
+
+private:
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+
+	using element_type = std::function<function_type>;
+	using container_allocator_type = typename alloc_traits::template rebind_alloc<element_type>;
+	using container_type = plf::colony<element_type, container_allocator_type>;
+
+	using erase_element_type = typename container_type::const_pointer;
+	using erase_container_allocator_type = typename alloc_traits::template rebind_alloc<erase_element_type>;
+	using erase_container_type = std::vector<erase_element_type, erase_container_allocator_type>;
+
+public:
+	synchronized_signal_handler() = default;
+
+	synchronized_signal_handler(synchronized_signal_handler const& other) {
+		auto lock = std::scoped_lock{other.callback_mut};
+		callbacks = other.callbacks;
+	}
+
+	synchronized_signal_handler(synchronized_signal_handler&& other) {
+		auto locks = std::scoped_lock{other.callback_mut, other.erase_mut};
+		to_erase = std::move(other.to_erase);
+		callbacks = std::move(other.callbacks);
+		allocator = std::move(other.allocator);
+	}
+
+	explicit synchronized_signal_handler(AllocatorT const& alloc) :
+		allocator(alloc),
+		callbacks(allocator),
+		to_erase(allocator) {
+	}
+
+	synchronized_signal_handler(synchronized_signal_handler const& other, AllocatorT const& alloc) :
+		allocator(alloc),
+		to_erase(allocator) {
+
+		auto lock = std::scoped_lock{other.callback_mut};
+		callbacks = container_type{other.callbacks, allocator};
+	}
+
+	synchronized_signal_handler(synchronized_signal_handler&& other, AllocatorT const& alloc) : allocator(alloc) {
+		auto locks = std::scoped_lock{other.callback_mut, other.erase_mut};
+		to_erase = erase_container_type{std::move(other.to_erase), allocator};
+		callbacks = container_type{std::move(other.callbacks), allocator};
+	}
+
+	~synchronized_signal_handler() = default;
+
+	auto operator=(synchronized_signal_handler const& other) -> synchronized_signal_handler& {
+		auto locks = std::scoped_lock{callback_mut, other.callback_mut};
+		callbacks = other.callbacks;
+		return *this;
+	}
+
+	auto operator=(synchronized_signal_handler&& other) -> synchronized_signal_handler& {
+		auto locks = std::scoped_lock{callback_mut, erase_mut, other.callback_mut, other.erase_mut};
+		callbacks = std::move(other.callbacks);
+		to_erase = std::move(other.to_erase);
+		return *this;
+	}
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return allocator;
+	}
 
 	/**
 	 * @brief Register a callback function that will be invoked when the signal is fired
@@ -106,10 +171,13 @@ private:
 		to_erase.clear();
 	}
 
-	container_type callbacks;
+
+	AllocatorT allocator;
+
+	container_type callbacks{allocator};
 	std::shared_mutex callback_mut;
 
-	std::vector<typename container_type::const_pointer> to_erase;
+	erase_container_type to_erase{allocator};
 	std::mutex erase_mut;
 };
 

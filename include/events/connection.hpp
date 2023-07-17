@@ -7,10 +7,10 @@
 namespace events {
 
 class connection {
-	template<typename...>
+	template<typename, typename>
 	friend class signal_handler;
 
-	template<typename...>
+	template<typename, typename>
 	friend class synchronized_signal_handler;
 
 	template<typename...>

@@ -14,12 +14,12 @@
 namespace events {
 namespace detail {
 
-template<typename EventT = void>
+template<typename EventT = void, typename AllocatorT = std::allocator<void>>
 class discrete_event_dispatcher;
 
 
-template<>
-class [[nodiscard]] discrete_event_dispatcher<void> {
+template<typename AllocatorT>
+class [[nodiscard]] discrete_event_dispatcher<void, AllocatorT> {
 public:
 	discrete_event_dispatcher() = default;
 	discrete_event_dispatcher(discrete_event_dispatcher const&) = delete;
@@ -36,9 +36,30 @@ public:
 };
 
 
-template<typename EventT>
-class [[nodiscard]] discrete_event_dispatcher final : public discrete_event_dispatcher<void> {
+template<typename EventT, typename AllocatorT>
+class [[nodiscard]] discrete_event_dispatcher final : public discrete_event_dispatcher<void, AllocatorT> {
+private:
+	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
+	using event_container_type = std::vector<EventT, event_allocator_type>;
+
 public:
+	discrete_event_dispatcher() = default;
+	discrete_event_dispatcher(discrete_event_dispatcher const&) = delete;
+	discrete_event_dispatcher(discrete_event_dispatcher&&) noexcept = default;
+
+	discrete_event_dispatcher(discrete_event_dispatcher&& other, AllocatorT const& allocator) :
+		handler(std::move(other.handler), allocator),
+		events(std::move(other.events), allocator) {
+	}
+
+	explicit discrete_event_dispatcher(AllocatorT const& allocator) : handler(allocator), events(allocator) {
+	}
+
+	~discrete_event_dispatcher() = default;
+
+	auto operator=(discrete_event_dispatcher const&) -> discrete_event_dispatcher& = delete;
+	auto operator=(discrete_event_dispatcher&&) noexcept -> discrete_event_dispatcher& = default;
+
 	template<std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
 		return handler.connect(std::forward<FunctionT>(callback));
@@ -87,8 +108,8 @@ public:
 	}
 
 private:
-	signal_handler<void(EventT const&)> handler;
-	std::vector<EventT> events;
+	signal_handler<void(EventT const&), AllocatorT> handler;
+	event_container_type events;
 };
 
 }  //namespace detail
@@ -98,8 +119,40 @@ private:
  * @brief Stores callback functions that will be invoked when an event is published. Events may be
  *        immediately dispatched or enqueued for future bulk dispatch.
  */
+template<typename AllocatorT = std::allocator<void>>
 class [[nodiscard]] event_dispatcher {
+private:
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+
+	using generic_dispatcher = detail::discrete_event_dispatcher<void, AllocatorT>;
+	using generic_dispatcher_pointer = std::shared_ptr<generic_dispatcher>;
+
+	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
+	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
+	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<std::type_index>, dispatcher_allocator_type>;
+
 public:
+	using allocator_type = AllocatorT;
+
+	event_dispatcher() = default;
+	event_dispatcher(event_dispatcher const&) = delete;
+	event_dispatcher(event_dispatcher&&) noexcept = default;
+
+	event_dispatcher(event_dispatcher&& other, AllocatorT const& alloc) noexcept :
+		allocator(alloc),
+		dispatchers(std::move(other.dispatchers), allocator) {
+	}
+
+	~event_dispatcher() = default;
+
+	auto operator=(event_dispatcher const) -> event_dispatcher& = delete;
+	auto operator=(event_dispatcher&&) noexcept -> event_dispatcher& = default;
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return allocator;
+	}
+
 	/**
 	 * @brief Register a callback function that will be invoked when an event of the specified type is published
 	 *
@@ -225,17 +278,20 @@ public:
 
 private:
 	template<typename EventT>
-	auto get_or_create_dispatcher() -> detail::discrete_event_dispatcher<EventT>& {
+	auto get_or_create_dispatcher() -> detail::discrete_event_dispatcher<EventT, AllocatorT>& {
+		using derived_type = detail::discrete_event_dispatcher<EventT, AllocatorT>;
+
 		auto const [iter, inserted] = dispatchers.try_emplace(std::type_index{typeid(EventT)});
 
 		if (inserted) {
-			iter->second = std::make_unique<detail::discrete_event_dispatcher<EventT>>();
+			iter->second = std::allocate_shared<derived_type>(allocator);
 		}
 
-		return static_cast<detail::discrete_event_dispatcher<EventT>&>(*(iter->second));
+		return static_cast<derived_type&>(*(iter->second));
 	}
 
-	std::map<std::type_index, std::unique_ptr<detail::discrete_event_dispatcher<>>> dispatchers;
+	AllocatorT allocator;
+	dispatcher_map_type dispatchers;
 };
 
 }  //namespace events

@@ -16,12 +16,12 @@
 namespace events {
 namespace detail {
 
-template<typename EventT = void>
+template<typename EventT = void, typename AllocatorT = std::allocator<void>>
 class synchronized_discrete_event_dispatcher;
 
 
-template<>
-class [[nodiscard]] synchronized_discrete_event_dispatcher<void> {
+template<typename AllocatorT>
+class [[nodiscard]] synchronized_discrete_event_dispatcher<void, AllocatorT> {
 public:
 	synchronized_discrete_event_dispatcher() = default;
 	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher const&) = delete;
@@ -39,9 +39,37 @@ public:
 };
 
 
-template<typename EventT>
-class [[nodiscard]] synchronized_discrete_event_dispatcher final : public synchronized_discrete_event_dispatcher<void> {
+template<typename EventT, typename AllocatorT>
+class [[nodiscard]] synchronized_discrete_event_dispatcher final : public synchronized_discrete_event_dispatcher<void, AllocatorT> {
+private:
+	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
+	using event_container_type = std::vector<EventT, event_allocator_type>;
+
 public:
+	synchronized_discrete_event_dispatcher() = default;
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher const&) = delete;
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&&) noexcept = default;
+
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&& other, AllocatorT const& alloc) {
+		auto lock = std::scoped_lock{other.events_mut};
+		handler = decltype(handler){std::move(other.handler), alloc};
+		events = event_container_type{std::move(other.events), alloc};
+	}
+
+	explicit synchronized_discrete_event_dispatcher(AllocatorT const& alloc) : handler(alloc), events(alloc) {
+	}
+
+	~synchronized_discrete_event_dispatcher() = default;
+
+	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
+
+	auto operator=(synchronized_discrete_event_dispatcher&& other) noexcept -> synchronized_discrete_event_dispatcher& {
+		auto lock = std::scoped_lock{other.events_mut};
+		handler = std::move(other.handler);
+		events = std::move(other.events);
+		return *this;
+	}
+
 	template<std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
 		return handler.connect(std::forward<FunctionT>(callback));
@@ -95,9 +123,9 @@ public:
 	}
 
 private:
-	synchronized_signal_handler<void(EventT const&)> handler;
+	synchronized_signal_handler<void(EventT const&), AllocatorT> handler;
 
-	std::vector<EventT> events;
+	event_container_type events;
 	std::mutex events_mut;
 };
 
@@ -107,8 +135,51 @@ private:
 /**
  * @brief A thread-safe @ref event_dispatcher
  */
+template<typename AllocatorT = std::allocator<void>>
 class [[nodiscard]] synchronized_event_dispatcher {
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+
+	using generic_dispatcher = detail::synchronized_discrete_event_dispatcher<void, AllocatorT>;
+	using generic_dispatcher_pointer = std::shared_ptr<generic_dispatcher>;
+
+	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
+	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
+	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<std::type_index>, dispatcher_allocator_type>;
+
 public:
+	using allocator_type = AllocatorT;
+
+	synchronized_event_dispatcher() = default;
+
+	synchronized_event_dispatcher(synchronized_event_dispatcher const&) = delete;
+
+	synchronized_event_dispatcher(synchronized_event_dispatcher&& other) {
+		auto lock = std::scoped_lock{other.dispatcher_mut};
+		dispatchers = std::move(other.dispatchers);
+		allocator = std::move(other.allocator);
+	}
+
+	synchronized_event_dispatcher(synchronized_event_dispatcher&& other, AllocatorT const& alloc) : allocator(alloc) {
+		auto lock = std::scoped_lock{other.dispatcher_mut};
+		dispatchers = dispatcher_map_type{std::move(other.dispatchers), allocator};
+	}
+
+	~synchronized_event_dispatcher() = default;
+
+	auto operator=(synchronized_event_dispatcher const) -> synchronized_event_dispatcher& = delete;
+
+	auto operator=(synchronized_event_dispatcher&& other) -> synchronized_event_dispatcher& {
+		auto locks = std::scoped_lock{dispatcher_mut, other.dispatcher_mut};
+		dispatchers = std::move(other.dispatchers);
+		allocator = std::move(other.allocator);
+		return *this;
+	}
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return allocator;
+	}
+
 	/**
 	 * @brief Register a callback function that will be invoked when an event of the specified type is published
 	 *
@@ -236,7 +307,9 @@ public:
 
 private:
 	template<typename EventT>
-	auto get_or_create_dispatcher() -> detail::synchronized_discrete_event_dispatcher<EventT>& {
+	auto get_or_create_dispatcher() -> detail::synchronized_discrete_event_dispatcher<EventT, AllocatorT>& {
+		using derived_dispatcher_type = detail::synchronized_discrete_event_dispatcher<EventT, AllocatorT>;
+
 		auto const key = std::type_index{typeid(EventT)};
 
 		// Attempt to find an existing dispatcher
@@ -244,7 +317,7 @@ private:
 			auto lock = std::shared_lock{dispatcher_mut};
 
 			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
-				return static_cast<detail::synchronized_discrete_event_dispatcher<EventT>&>(*(it->second));
+				return static_cast<derived_dispatcher_type&>(*(it->second));
 			}
 		}
 
@@ -256,13 +329,14 @@ private:
 		// Check if it actually was created since two threads could get to the point where they try
 		// to acquire an exclusive lock.
 		if (inserted) {
-			iter->second = std::make_unique<detail::synchronized_discrete_event_dispatcher<EventT>>();
+			iter->second = std::allocate_shared<derived_dispatcher_type>(allocator);
 		}
 
-		return static_cast<detail::synchronized_discrete_event_dispatcher<EventT>&>(*(iter->second));
+		return static_cast<derived_dispatcher_type&>(*(iter->second));
 	}
 
-	std::map<std::type_index, std::unique_ptr<detail::synchronized_discrete_event_dispatcher<>>> dispatchers;
+	AllocatorT allocator;
+	dispatcher_map_type dispatchers;
 	std::shared_mutex dispatcher_mut;
 };
 

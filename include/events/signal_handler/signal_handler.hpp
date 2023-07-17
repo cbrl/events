@@ -2,6 +2,7 @@
 
 #include <concepts>
 #include <functional>
+#include <memory>
 #include <ranges>
 
 #include <plf_colony.h>
@@ -11,18 +12,49 @@
 
 namespace events {
 
-template<typename...>
+template<typename FunctionT, typename = std::allocator<void>>
 class signal_handler;
+
 
 /**
  * @brief Stores a set of callback functions that will be invoked when the signal is published
  */
-template<typename ReturnT, typename... ArgsT>
-class [[nodiscard]] signal_handler<ReturnT(ArgsT...)> {
-	using container_type = plf::colony<std::function<ReturnT(ArgsT...)>>;
-
+template<typename ReturnT, typename... ArgsT, typename AllocatorT>
+class [[nodiscard]] signal_handler<ReturnT(ArgsT...), AllocatorT> {
 public:
 	using function_type = ReturnT(ArgsT...);
+	using allocator_type = AllocatorT;
+
+private:
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+	using element_type = std::function<function_type>;
+	using container_allocator_type = typename alloc_traits::template rebind_alloc<element_type>;
+	using container_type = plf::colony<element_type, container_allocator_type>;
+
+public:
+	signal_handler() = default;
+	signal_handler(signal_handler const&) = default;
+	signal_handler(signal_handler&&) noexcept = default;
+
+	signal_handler(signal_handler const& other, AllocatorT const& allocator) : callbacks(other.callbacks, allocator) {
+	}
+
+	signal_handler(signal_handler&& other, AllocatorT const& allocator) :
+		callbacks(std::move(other.callbacks), allocator) {
+	}
+
+	explicit signal_handler(AllocatorT const& allocator) : callbacks(allocator) {
+	}
+
+	~signal_handler() = default;
+
+	auto operator=(signal_handler const&) -> signal_handler& = default;
+	auto operator=(signal_handler&&) noexcept -> signal_handler& = default;
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return callbacks.get_allocator();
+	}
 
 	/**
 	 * @brief Register a callback function that will be invoked when the signal is fired
