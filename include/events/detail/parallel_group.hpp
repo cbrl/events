@@ -342,11 +342,11 @@ private:
 		}
 	};
 
-	public:
+public:
 	/// Constructor.
-	explicit ranged_parallel_group(Range range, Allocator const& allocator = Allocator()) :
-		range_(std::move(range)),
-		allocator_(allocator) {
+	explicit ranged_parallel_group(Range range, Allocator const& alloc = Allocator()) :
+		range(std::move(range)),
+		allocator(alloc) {
 	}
 
 	/// The completion signature for the group of operations.
@@ -384,13 +384,13 @@ private:
 			initiate_async_wait(),
 			token,
 			std::move(cancellation_condition),
-			std::move(range_),
-			allocator_
+			std::move(range),
+			allocator
 		);
 	}
 
-	Range range_;
-	Allocator allocator_;
+	Range range;
+	Allocator allocator;
 };
 
 
