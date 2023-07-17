@@ -19,6 +19,9 @@
 
 #include <events/connection.hpp>
 
+#include <events/detail/parallel_group.hpp>
+#include <events/detail/void_parallel_group.hpp>
+
 
 namespace events {
 
@@ -56,20 +59,12 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 			});
 		}
 		else {
-			boost::asio::experimental::make_parallel_group(std::move(ops))
-			    .async_wait(
-			        boost::asio::experimental::wait_for_all{},
-			        //NOLINTNEXTLINE(performance-unnecessary-value-param)
-			        [handler = std::move(completion_handler
-			         )](std::vector<size_t> /*completion_order*/, [[maybe_unused]] auto... results) mutable {
-				        if constexpr ((std::same_as<void, ResultsT> && ...)) {
-					        std::move(handler)();
-				        }
-				        else {
-					        std::move(handler)(std::move(results)...);
-				        }
-			        }
-			    );
+			if constexpr ((std::same_as<void, ResultsT> && ...)) {
+				events::detail::make_void_parallel_group(std::move(ops)).async_wait(boost::asio::experimental::wait_for_all{}, std::move(completion_handler));
+			}
+			else {
+				events::detail::make_parallel_group(std::move(ops)).async_wait(boost::asio::experimental::wait_for_all{}, std::move(completion_handler));
+			}
 		}
 	};
 

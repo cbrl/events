@@ -97,7 +97,7 @@ auto threaded_test(auto& dispatcher) -> void {
 	auto const single_time = duration_cast<milliseconds>(single_enqueue_time + single_dispatch_time);
 	std::cout << std::format("    single dispatch {} of {}: {}\n", count->load(), total_events, single_time);
 	std::cout << std::format("        enqueue:  {}\n", duration_cast<milliseconds>(single_enqueue_time));
-	std::cout << std::format("        dispatch: {}\n", duration_cast<milliseconds>(single_dispatch_time));
+	std::cout << std::format("        dispatch: {}\n", duration_cast<milliseconds>(single_dispatch_time)) << std::flush;
 }
 
 auto main() -> int {
