@@ -26,7 +26,7 @@
 namespace events::detail {
 
 template<typename AllocatorT, typename RebindT>
-using rebind_alloc = std::allocator_traits<AllocatorT>::template rebind_alloc<RebindT>;
+using rebind_alloc = typename std::allocator_traits<AllocatorT>::template rebind_alloc<RebindT>;
 
 
 template <typename Signature>
@@ -322,7 +322,7 @@ auto ranged_parallel_group_launch(
 
 	// Register a handler with the user's completion handler's cancellation slot.
 	if (slot.is_connected()) {
-		//slot.template emplace<ranged_parallel_group_cancellation_handler<Condition, Handler, op_type, Allocator>>(state);
+		slot.template emplace<ranged_parallel_group_cancellation_handler<Condition, Handler, op_type, Allocator>>(state);
 	}
 }
 
