@@ -17,10 +17,10 @@ auto main() -> int {
 	}
 
 	// The async_dispatch() function will dispatch all events to the io_context. Note that the regular dispatch()
-	// function will dispatch on the caller thread instead. Because async_dispatch() requires posting functors
-	// carrying additional state to the execution context, this usage pattern can cause much higher memory usage in
-	// situations where very large numbers of events are expected.
-	dispatcher.async_dispatch([]{});
+	// function will dispatch on the caller thread instead.
+	// Because async_dispatch() requires posting functors carrying additional state to the execution context, this
+	// usage pattern can cause much higher memory usage in situations where very large numbers of events are expected.
+	dispatcher.async_dispatch();
 	context.run();
 	context.reset();
 
@@ -29,8 +29,8 @@ auto main() -> int {
 	}
 
 	// async_dispatch() can also take an ASIO completion token. Note that this method requires gathering all invocation
-	// operations before launching them, causing an even larger upfront memory allocation than the parameter-less
-	// async_dispatch().
+	// operations for all dispatchers before launching them, causing an even larger upfront memory allocation than the
+	// overload of async_dispatch() that takes no parameters.
 	dispatcher.async_dispatch([] {
 		std::cout << "Dispatch completed\n" << std::flush;
 	});

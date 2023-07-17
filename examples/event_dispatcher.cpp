@@ -11,7 +11,7 @@ struct ContrivedEvent {
 auto main() -> int {
 	auto dispatcher = events::event_dispatcher{};
 
-	// Listeners can be connected much like a signal_handler. Howver, this method requires a template parameter that
+	// Listeners can be connected much like a signal_handler. However, this method requires a template parameter that
 	// indicates the type of event this function is subscribing to.
 	events::connection connection = dispatcher.connect<ContrivedEvent>([](auto const& event) {
 		std::cout << "Received an event: " << event.value << '\n';
