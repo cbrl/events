@@ -47,8 +47,17 @@ private:
 
 public:
 	synchronized_discrete_event_dispatcher() = default;
+
+	explicit synchronized_discrete_event_dispatcher(AllocatorT const& alloc) : handler(alloc), events(alloc) {
+	}
+
 	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher const&) = delete;
-	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&&) noexcept = default;
+
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&& other) {
+		auto lock = std::scoped_lock{other.events_mut};
+		handler = std::move(other.handler);
+		events = std::move(other.events);
+	}
 
 	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&& other, AllocatorT const& alloc) {
 		auto lock = std::scoped_lock{other.events_mut};
@@ -56,15 +65,12 @@ public:
 		events = event_container_type{std::move(other.events), alloc};
 	}
 
-	explicit synchronized_discrete_event_dispatcher(AllocatorT const& alloc) : handler(alloc), events(alloc) {
-	}
-
 	~synchronized_discrete_event_dispatcher() = default;
 
 	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
 
-	auto operator=(synchronized_discrete_event_dispatcher&& other) noexcept -> synchronized_discrete_event_dispatcher& {
-		auto lock = std::scoped_lock{other.events_mut};
+	auto operator=(synchronized_discrete_event_dispatcher&& other) -> synchronized_discrete_event_dispatcher& {
+		auto lock = std::scoped_lock{events_mut, other.events_mut};
 		handler = std::move(other.handler);
 		events = std::move(other.events);
 		return *this;
@@ -151,27 +157,66 @@ public:
 
 	synchronized_event_dispatcher() = default;
 
-	synchronized_event_dispatcher(synchronized_event_dispatcher const&) = delete;
-
-	synchronized_event_dispatcher(synchronized_event_dispatcher&& other) {
-		auto lock = std::scoped_lock{other.dispatcher_mut};
-		dispatchers = std::move(other.dispatchers);
-		allocator = std::move(other.allocator);
+	explicit synchronized_event_dispatcher(AllocatorT const& alloc) : allocator(alloc) {
 	}
 
+	synchronized_event_dispatcher(synchronized_event_dispatcher const&) = delete;
+
+	/**
+	 * @brief Construct a new synchronized_event_dispatcher that will take ownership of another's signal handlers and
+	 *        enqueued events.
+	 *
+	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
+	 */
+	synchronized_event_dispatcher(synchronized_event_dispatcher&& other) {
+		auto lock = std::scoped_lock{other.dispatcher_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		dispatchers = std::move(other.dispatchers);
+	}
+
+	/**
+	 * @brief Construct a new synchronized_event_dispatcher that will take ownership of another's signal handlers and
+	 *        enqueued events.
+	 *
+	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
+	 */
 	synchronized_event_dispatcher(synchronized_event_dispatcher&& other, AllocatorT const& alloc) : allocator(alloc) {
 		auto lock = std::scoped_lock{other.dispatcher_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
 		dispatchers = dispatcher_map_type{std::move(other.dispatchers), allocator};
 	}
 
 	~synchronized_event_dispatcher() = default;
 
-	auto operator=(synchronized_event_dispatcher const) -> synchronized_event_dispatcher& = delete;
+	auto operator=(synchronized_event_dispatcher const&) -> synchronized_event_dispatcher& = delete;
 
+	/**
+	 * @brief Move a the signal handlers and enqueued events from a synchronized_event_dispatcher into this one
+	 *
+	 * @details Existing connection objects from this event dispatcher are invalidated. Existing connection objects
+	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
+	 */
 	auto operator=(synchronized_event_dispatcher&& other) -> synchronized_event_dispatcher& {
+		if (&other == this) {
+			return *this;
+		}
+
 		auto locks = std::scoped_lock{dispatcher_mut, other.dispatcher_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
 		dispatchers = std::move(other.dispatchers);
-		allocator = std::move(other.allocator);
+
 		return *this;
 	}
 
@@ -329,14 +374,14 @@ private:
 		// Check if it actually was created since two threads could get to the point where they try
 		// to acquire an exclusive lock.
 		if (inserted) {
-			iter->second = std::allocate_shared<derived_dispatcher_type>(allocator);
+			iter->second = std::allocate_shared<derived_dispatcher_type>(allocator, allocator);
 		}
 
 		return static_cast<derived_dispatcher_type&>(*(iter->second));
 	}
 
 	AllocatorT allocator;
-	dispatcher_map_type dispatchers;
+	dispatcher_map_type dispatchers{allocator};
 	std::shared_mutex dispatcher_mut;
 };
 

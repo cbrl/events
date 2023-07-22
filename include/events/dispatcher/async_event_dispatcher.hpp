@@ -21,12 +21,12 @@
 namespace events {
 namespace detail {
 
-template<typename EventT, typename CallbackPolicyT>
+template<typename EventT, typename CallbackPolicyT, typename AllocatorT = std::allocator<void>>
 class async_discrete_event_dispatcher;
 
 
-template<typename CallbackPolicyT>
-class [[nodiscard]] async_discrete_event_dispatcher<void, CallbackPolicyT> {
+template<typename CallbackPolicyT, typename AllocatorT>
+class [[nodiscard]] async_discrete_event_dispatcher<void, CallbackPolicyT, AllocatorT> {
 public:
 	async_discrete_event_dispatcher() = default;
 	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
@@ -45,23 +45,54 @@ public:
 };
 
 
-template<typename EventT, typename CallbackPolicyT>
+template<typename EventT, typename CallbackPolicyT, typename AllocatorT>
 class [[nodiscard]] async_discrete_event_dispatcher final
-    : public async_discrete_event_dispatcher<void, CallbackPolicyT> {
-	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT>;
+    : public async_discrete_event_dispatcher<void, CallbackPolicyT, AllocatorT> {
+
+	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT, AllocatorT>;
+
+	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
+	using event_container_type = std::vector<EventT, event_allocator_type>;
 
 public:
 	explicit async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec) :
 	    handler(signal_handler_type::create(exec)) {
 	}
 
+	async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec, AllocatorT const& allocator) :
+		handler(signal_handler_type::allocate(allocator, exec, allocator)),
+		events(allocator) {
+	}
+
 	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
-	async_discrete_event_dispatcher(async_discrete_event_dispatcher&&) noexcept = default;
+
+	async_discrete_event_dispatcher(async_discrete_event_dispatcher&& other) {
+		auto lock = std::scoped_lock{other.events_mut};
+		handler = std::move(other.handler);
+		events = std::move(other.events);
+	}
+
+	async_discrete_event_dispatcher(async_discrete_event_dispatcher&& other, AllocatorT const& alloc) {
+		auto lock = std::scoped_lock{other.events_mut};
+		handler = decltype(handler){std::move(other.handler), alloc};
+		events = event_container_type{std::move(other.events), alloc};
+	}
 
 	~async_discrete_event_dispatcher() override = default;
 
 	auto operator=(async_discrete_event_dispatcher const&) -> async_discrete_event_dispatcher& = delete;
-	auto operator=(async_discrete_event_dispatcher&&) noexcept -> async_discrete_event_dispatcher& = default;
+
+	auto operator=(async_discrete_event_dispatcher&& other) -> async_discrete_event_dispatcher& {
+		if (&other == this) {
+			return *this;
+		}
+
+		auto lock = std::scoped_lock{events_mut, other.events_mut};
+		handler = std::move(other.handler);
+		events = std::move(other.events);
+
+		return *this;
+	}
 
 	template<std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
@@ -169,14 +200,17 @@ private:
 
 		auto default_exec = handler->get_executor();
 		return detail::parallel_publish<void>(
-		    default_exec, std::move(operations), std::forward<CompletionToken>(completion)
+			default_exec,
+			std::move(operations),
+			std::forward<CompletionToken>(completion),
+			handler->get_allocator()
 		);
 	}
 
 
 	std::shared_ptr<signal_handler_type> handler;
 
-	std::vector<EventT> events;
+	event_container_type events;
 	std::mutex events_mut;
 };
 
@@ -186,26 +220,111 @@ private:
 /**
  * @brief An @ref event_dispatcher that invokes callbacks asynchronously
  */
-template<typename CallbackPolicyT = callback_policy::concurrent>
+template<typename CallbackPolicyT = callback_policy::concurrent, typename AllocatorT = std::allocator<void>>
 class [[nodiscard]] async_event_dispatcher {
 	template<typename T>
-	using dispatcher_type = detail::async_discrete_event_dispatcher<T, CallbackPolicyT>;
+	using dispatcher_type = detail::async_discrete_event_dispatcher<T, CallbackPolicyT, AllocatorT>;
+
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+
+	using generic_dispatcher = dispatcher_type<void>;
+	using generic_dispatcher_pointer = std::shared_ptr<generic_dispatcher>;
+
+	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
+	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
+	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<std::type_index>, dispatcher_allocator_type>;
 
 public:
+	using allocator_type = AllocatorT;
+	using callback_policy = CallbackPolicyT;
+
 	explicit async_event_dispatcher(boost::asio::any_io_executor exec) : executor(std::move(exec)) {
 	}
 
 	template<typename ExecutionContext>
-	explicit async_event_dispatcher(ExecutionContext& exec) : executor(exec.get_executor()) {
+	explicit async_event_dispatcher(ExecutionContext& context) : async_event_dispatcher(context.get_executor()) {
+	}
+
+	async_event_dispatcher(boost::asio::any_io_executor exec, AllocatorT const& alloc) :
+		allocator(alloc),
+		executor(std::move(exec)) {
+	}
+
+	template<typename ExecutionContext>
+	async_event_dispatcher(ExecutionContext& context, AllocatorT const& alloc) :
+		async_event_dispatcher(context.get_executor(), alloc) {
 	}
 
 	async_event_dispatcher(async_event_dispatcher const&) = delete;
-	async_event_dispatcher(async_event_dispatcher&&) noexcept = default;
+
+	/**
+	 * @brief Construct a new async_event_dispatcher that will take ownership of another's signal handlers and enqueued
+	 *        events.
+	 *
+	 * @details Existing connection objects from the other event dispatcher are NOT invalidated. Moving from an event
+	 *          dispatcher that has running callbacks is allowed.
+	 */
+	async_event_dispatcher(async_event_dispatcher&& other) {
+		auto lock = std::scoped_lock{other.dispatcher_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		executor = std::move(other.executor);
+		dispatchers = std::move(other.dispatchers);
+	}
+
+	/**
+	 * @brief Construct a new async_event_dispatcher that will take ownership of another's signal handlers and enqueued
+	 *        events.
+	 *
+	 * @details Existing connection objects from the other event dispatcher are NOT invalidated. Moving from an event
+	 *          dispatcher that has running callbacks is allowed.
+	 */
+	async_event_dispatcher(async_event_dispatcher&& other, AllocatorT const& alloc) : allocator(alloc) {
+		auto lock = std::scoped_lock{other.dispatcher_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		executor = std::move(other.executor);
+		dispatchers = dispatcher_map_type{std::move(other.dispatchers), alloc};
+	}
 
 	~async_event_dispatcher() = default;
 
 	auto operator=(async_event_dispatcher const&) -> async_event_dispatcher& = delete;
-	auto operator=(async_event_dispatcher&&) noexcept -> async_event_dispatcher& = default;
+
+	/**
+	 * @brief Move a the signal handlers and enqueued events from an async_event_dispatcher into this one
+	 *
+	 * @details Existing connection objects from this event dispatcher are invalidated. Existing connection objects
+	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
+	 *          Moving to and from an event dispatcher that has running callbacks is allowed.
+	 */
+	auto operator=(async_event_dispatcher&& other) -> async_event_dispatcher& {
+		if (&other == this) {
+			return *this;
+		}
+
+		auto locks = std::scoped_lock{dispatcher_mut, other.dispatcher_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		executor = std::move(other.executor);
+		dispatchers = std::move(other.dispatchers);
+
+		return *this;
+	}
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return allocator;
+	}
 
 	/**
 	 * @brief Register a callback function that will be invoked when an event of the specified type is published
@@ -379,7 +498,7 @@ public:
 			);
 		};
 
-		using op_type = decltype(initiate(*(dispatchers.begin()->second)));
+		using op_type = decltype(initiate(std::declval<dispatcher_type<void>&>()));
 		auto operations = std::vector<op_type>{};
 		operations.reserve(dispatchers.size());
 
@@ -388,7 +507,10 @@ public:
 		}
 
 		return detail::parallel_publish<void>(
-		    executor, std::move(operations), std::forward<CompletionToken>(completion)
+		    executor,
+			std::move(operations),
+			std::forward<CompletionToken>(completion),
+			allocator
 		);
 	}
 
@@ -433,15 +555,17 @@ private:
 		// Check if it actually was created since two threads could get to the point where they try
 		// to acquire an exclusive lock.
 		if (inserted) {
-			iter->second = std::make_unique<dispatcher_type<EventT>>(executor);
+			iter->second = std::allocate_shared<dispatcher_type<EventT>>(allocator, executor, allocator);
 		}
 
 		return static_cast<dispatcher_type<EventT>&>(*(iter->second));
 	}
 
+	AllocatorT allocator;
+
 	boost::asio::any_io_executor executor;
 
-	std::map<std::type_index, std::unique_ptr<dispatcher_type<void>>> dispatchers;
+	dispatcher_map_type dispatchers{allocator};
 	std::shared_mutex dispatcher_mut;
 };
 

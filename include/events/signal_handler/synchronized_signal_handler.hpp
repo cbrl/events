@@ -40,56 +40,93 @@ private:
 public:
 	synchronized_signal_handler() = default;
 
+	explicit synchronized_signal_handler(AllocatorT const& alloc) : callbacks(alloc), to_erase(alloc) {
+	}
+
+	/**
+	 * @brief Construct a new synchronized_signal_handler that holds the same callbacks as another.
+	 *
+	 * @details Connection objects from the original signal handler will still only refer to callbacks in that signal
+	 *          handler.
+	 */
 	synchronized_signal_handler(synchronized_signal_handler const& other) {
 		auto lock = std::scoped_lock{other.callback_mut};
 		callbacks = other.callbacks;
 	}
 
+	/**
+	 * @brief Construct a new synchronized_signal_handler that holds the same callbacks as another.
+	 *
+	 * @details Connection objects from the original signal handler will still only refer to callbacks in that signal
+	 *          handler.
+	 */
+	synchronized_signal_handler(synchronized_signal_handler const& other, AllocatorT const& alloc) : to_erase(alloc) {
+		auto locks = std::scoped_lock{other.callback_mut, other.erase_mut};
+		other.erase_expired_callbacks_impl();
+		callbacks = container_type{other.callbacks, alloc};
+	}
+
+	/**
+	 * @brief Construct a new synchronized_signal_handler that will take ownership of another's callbacks
+	 *
+	 * @details Existing connection objects from the original signal handler are invalidated.
+	 */
 	synchronized_signal_handler(synchronized_signal_handler&& other) {
 		auto locks = std::scoped_lock{other.callback_mut, other.erase_mut};
 		to_erase = std::move(other.to_erase);
 		callbacks = std::move(other.callbacks);
-		allocator = std::move(other.allocator);
 	}
 
-	explicit synchronized_signal_handler(AllocatorT const& alloc) :
-		allocator(alloc),
-		callbacks(allocator),
-		to_erase(allocator) {
-	}
-
-	synchronized_signal_handler(synchronized_signal_handler const& other, AllocatorT const& alloc) :
-		allocator(alloc),
-		to_erase(allocator) {
-
-		auto lock = std::scoped_lock{other.callback_mut};
-		callbacks = container_type{other.callbacks, allocator};
-	}
-
-	synchronized_signal_handler(synchronized_signal_handler&& other, AllocatorT const& alloc) : allocator(alloc) {
+	/**
+	 * @brief Construct a new synchronized_signal_handler that will take ownership of another's callbacks
+	 *
+	 * @details Existing connection objects from the original signal handler are invalidated.
+	 */
+	synchronized_signal_handler(synchronized_signal_handler&& other, AllocatorT const& alloc) {
 		auto locks = std::scoped_lock{other.callback_mut, other.erase_mut};
-		to_erase = erase_container_type{std::move(other.to_erase), allocator};
-		callbacks = container_type{std::move(other.callbacks), allocator};
+		to_erase = erase_container_type{std::move(other.to_erase), alloc};
+		callbacks = container_type{std::move(other.callbacks), alloc};
 	}
 
 	~synchronized_signal_handler() = default;
 
+	/**
+	 * @brief Copy the valid callbacks from a synchronized_signal_handler to this one
+	 *
+	 * @details Existing connection objects from this signal handler are invalidated. Connection objects from the other
+	 *          signal handler will still only refer to callbacks in that signal handler.
+	 */
 	auto operator=(synchronized_signal_handler const& other) -> synchronized_signal_handler& {
-		auto locks = std::scoped_lock{callback_mut, other.callback_mut};
+		if (&other == this) {
+			return *this;
+		}
+
+		auto locks = std::scoped_lock{callback_mut, other.callback_mut, other.erase_mut};
+		other.erase_expired_callbacks_impl();
 		callbacks = other.callbacks;
+
 		return *this;
 	}
 
+	/**
+	 * @brief Move the valid callbacks from a synchronized_signal_handler to this one
+	 * @details Existing connection objects from both signal handlers are invalidated.
+	 */
 	auto operator=(synchronized_signal_handler&& other) -> synchronized_signal_handler& {
+		if (&other == this) {
+			return *this;
+		}
+
 		auto locks = std::scoped_lock{callback_mut, erase_mut, other.callback_mut, other.erase_mut};
 		callbacks = std::move(other.callbacks);
 		to_erase = std::move(other.to_erase);
+
 		return *this;
 	}
 
 	[[nodiscard]]
 	constexpr auto get_allocator() const noexcept -> allocator_type {
-		return allocator;
+		return callbacks.get_allocator();
 	}
 
 	/**
@@ -163,7 +200,11 @@ private:
 
 	auto erase_expired_callbacks() -> void {
 		auto locks = std::scoped_lock{callback_mut, erase_mut};
+		erase_expired_callbacks_impl();
+	}
 
+	// Requires an exclusive lock on callback_mut and erase_mut
+	auto erase_expired_callbacks_impl() -> void {
 		for (auto callback_pointer : to_erase) {
 			callbacks.erase(callbacks.get_iterator(callback_pointer));
 		}
@@ -172,12 +213,10 @@ private:
 	}
 
 
-	AllocatorT allocator;
-
-	container_type callbacks{allocator};
+	container_type callbacks;
 	std::shared_mutex callback_mut;
 
-	erase_container_type to_erase{allocator};
+	erase_container_type to_erase;
 	std::mutex erase_mut;
 };
 

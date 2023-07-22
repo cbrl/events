@@ -344,7 +344,7 @@ private:
 
 public:
 	/// Constructor.
-	explicit ranged_parallel_group(Range range, Allocator const& alloc = Allocator()) :
+	explicit ranged_parallel_group(Range range, Allocator const& alloc = Allocator{}) :
 		range(std::move(range)),
 		allocator(alloc) {
 	}
@@ -394,10 +394,18 @@ public:
 };
 
 
-template <typename Range> requires (boost::asio::experimental::is_async_operation_range<std::decay_t<Range>>::value != 0)
+template <typename Range>
+requires (boost::asio::experimental::is_async_operation_range<std::decay_t<Range>>::value != 0)
 [[nodiscard]]
 auto make_parallel_group(Range&& range) -> ranged_parallel_group<std::decay_t<Range>> {
 	return ranged_parallel_group<std::decay_t<Range>>(std::forward<Range>(range));
+}
+
+template<typename Range, typename Allocator>
+requires (boost::asio::experimental::is_async_operation_range<std::decay_t<Range>>::value != 0)
+[[nodiscard]]
+auto make_parallel_group(Range&& range, Allocator const& allocator) -> ranged_parallel_group<std::decay_t<Range>> {
+	return ranged_parallel_group<std::decay_t<Range>>(std::forward<Range>(range), allocator);
 }
 
 } //namespace events::detail

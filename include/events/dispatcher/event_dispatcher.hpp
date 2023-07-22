@@ -44,15 +44,17 @@ private:
 
 public:
 	discrete_event_dispatcher() = default;
+
+	explicit discrete_event_dispatcher(AllocatorT const& allocator) : handler(allocator), events(allocator) {
+	}
+
 	discrete_event_dispatcher(discrete_event_dispatcher const&) = delete;
+
 	discrete_event_dispatcher(discrete_event_dispatcher&&) noexcept = default;
 
 	discrete_event_dispatcher(discrete_event_dispatcher&& other, AllocatorT const& allocator) :
 		handler(std::move(other.handler), allocator),
 		events(std::move(other.events), allocator) {
-	}
-
-	explicit discrete_event_dispatcher(AllocatorT const& allocator) : handler(allocator), events(allocator) {
 	}
 
 	~discrete_event_dispatcher() = default;
@@ -135,9 +137,33 @@ public:
 	using allocator_type = AllocatorT;
 
 	event_dispatcher() = default;
-	event_dispatcher(event_dispatcher const&) = delete;
-	event_dispatcher(event_dispatcher&&) noexcept = default;
 
+	explicit event_dispatcher(AllocatorT const& alloc) : allocator(alloc) {
+	}
+
+	event_dispatcher(event_dispatcher const&) = delete;
+
+	/**
+	 * @brief Construct a new event_dispatcher that will take ownership of another's signal handlers and enqueued
+	 *        events.
+	 *
+	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
+	 */
+	event_dispatcher(event_dispatcher&& other) noexcept {
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		dispatchers = std::move(other.dispatchers);
+	}
+
+	/**
+	 * @brief Construct a new event_dispatcher that will take ownership of another's signal handlers and enqueued
+	 *        events.
+	 *
+	 * @details Existing connection objects from the other event dispatcher are NOT invalidated, and will now refer to
+	 *          this event dispatcher.
+	 */
 	event_dispatcher(event_dispatcher&& other, AllocatorT const& alloc) noexcept :
 		allocator(alloc),
 		dispatchers(std::move(other.dispatchers), allocator) {
@@ -145,8 +171,23 @@ public:
 
 	~event_dispatcher() = default;
 
-	auto operator=(event_dispatcher const) -> event_dispatcher& = delete;
-	auto operator=(event_dispatcher&&) noexcept -> event_dispatcher& = default;
+	auto operator=(event_dispatcher const&) -> event_dispatcher& = delete;
+
+	/**
+	 * @brief Move a the signal handlers and enqueued events from an event_dispatcher into this one
+	 *
+	 * @details Existing connection objects from this event dispatcher are invalidated. Existing connection objects
+	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
+	 */
+	auto operator=(event_dispatcher&& other) noexcept -> event_dispatcher& {
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		dispatchers = std::move(other.dispatchers);
+
+		return *this;
+	}
 
 	[[nodiscard]]
 	constexpr auto get_allocator() const noexcept -> allocator_type {
@@ -284,14 +325,14 @@ private:
 		auto const [iter, inserted] = dispatchers.try_emplace(std::type_index{typeid(EventT)});
 
 		if (inserted) {
-			iter->second = std::allocate_shared<derived_type>(allocator);
+			iter->second = std::allocate_shared<derived_type>(allocator, allocator);
 		}
 
 		return static_cast<derived_type&>(*(iter->second));
 	}
 
 	AllocatorT allocator;
-	dispatcher_map_type dispatchers;
+	dispatcher_map_type dispatchers{allocator};
 };
 
 }  //namespace events

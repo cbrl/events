@@ -33,12 +33,32 @@ private:
 
 public:
 	signal_handler() = default;
-	signal_handler(signal_handler const&) = default;
-	signal_handler(signal_handler&&) noexcept = default;
 
+	signal_handler(signal_handler const&) = default;
+
+	/**
+	 * @brief Construct a new signal_handler that holds the same callbacks as another.
+	 *
+	 * @details Connection objects from the original signal handler will still only refer to callbacks in that signal
+	 *          handler.
+	 */
 	signal_handler(signal_handler const& other, AllocatorT const& allocator) : callbacks(other.callbacks, allocator) {
 	}
 
+	/**
+	 * @brief Construct a new signal_handler that will take ownership of another's callbacks
+	 *
+	 * @details Moving from a handler with running callbacks is undefined behavior. Existing connection objects from
+	 *          the original signal handler are invalidated.
+	 */
+	signal_handler(signal_handler&&) noexcept = default;
+
+	/**
+	 * @brief Construct a new signal_handler that will take ownership of another's callbacks
+	 *
+	 * @details Moving from a handler with running callbacks is undefined behavior. Existing connection objects from
+	 *          the original signal handler are invalidated.
+	 */
 	signal_handler(signal_handler&& other, AllocatorT const& allocator) :
 		callbacks(std::move(other.callbacks), allocator) {
 	}
@@ -48,7 +68,18 @@ public:
 
 	~signal_handler() = default;
 
+	/**
+	 * @brief Copy the callbacks from a signal_handler to this one
+	 *
+	 * @details Existing connection objects from this signal handler are invalidated. Connection objects from the other
+	 *          signal handler will still only refer to callbacks in that signal handler.
+	 */
 	auto operator=(signal_handler const&) -> signal_handler& = default;
+
+	/**
+	 * @brief Move the callbacks from a signal_handler to this one
+	 * @details Existing connection objects from both signal handlers are invalidated.
+	 */
 	auto operator=(signal_handler&&) noexcept -> signal_handler& = default;
 
 	[[nodiscard]]

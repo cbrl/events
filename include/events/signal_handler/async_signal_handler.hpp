@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <concepts>
 #include <functional>
 #include <memory>
@@ -35,8 +36,13 @@ namespace detail {
  *
  * @tparam ResultsT...  The completion parameters of the operations
  */
-template<typename... ResultsT, typename Operations, typename CompletionToken>
-auto parallel_publish(auto default_executor, Operations&& operations, CompletionToken&& completion_token) {
+template<typename... ResultsT, typename Operations, typename CompletionToken, typename Allocator>
+auto parallel_publish(
+	auto default_executor,
+	Operations&& operations,
+	CompletionToken&& completion_token,
+	Allocator const& allocator
+) {
 	// clang-format off
 	using completion_type = std::conditional_t<
 		std::conjunction_v<std::is_same<void, ResultsT>...>,
@@ -45,7 +51,7 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 	>;
 	// clang-format on
 
-	auto initiation = [&default_executor, ops = std::forward<Operations>(operations)](auto completion_handler) mutable {
+	auto initiation = [&default_executor, &allocator, ops = std::forward<Operations>(operations)](auto completion_handler) mutable {
 		if (ops.empty()) {
 			auto completion_ex = boost::asio::get_associated_executor(completion_handler, default_executor);
 
@@ -60,10 +66,12 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 		}
 		else {
 			if constexpr ((std::same_as<void, ResultsT> && ...)) {
-				events::detail::make_void_parallel_group(std::move(ops)).async_wait(boost::asio::experimental::wait_for_all{}, std::move(completion_handler));
+				events::detail::make_void_parallel_group(std::move(ops), allocator)
+					.async_wait(boost::asio::experimental::wait_for_all{}, std::move(completion_handler));
 			}
 			else {
-				events::detail::make_parallel_group(std::move(ops)).async_wait(boost::asio::experimental::wait_for_all{}, std::move(completion_handler));
+				events::detail::make_parallel_group(std::move(ops), allocator)
+					.async_wait(boost::asio::experimental::wait_for_all{}, std::move(completion_handler));
 			}
 		}
 	};
@@ -76,12 +84,11 @@ auto parallel_publish(auto default_executor, Operations&& operations, Completion
 /// Defines the how a callback is handled when a signal is fired while the callback is still executing
 struct callback_policy {
 	struct drop {};  ///< The callback will drop the signal if it hasn't finished processing the last signal
-	struct concurrent {
-	};  ///< The callback will be launched regardless of whether it has finished processing the last signal
+	struct concurrent {};  ///< The callback will be launched again even if it has finished processing the last signal
 };
 
 
-template<typename...>
+template<typename FunctionT, typename PolicyT, typename AllocatorT = std::allocator<void>>
 class async_signal_handler;
 
 
@@ -89,43 +96,260 @@ class async_signal_handler;
  * @brief A signal handler that invokes callbacks asynchronously. Callbacks that don't finish before a new signal is
  *        published will drop the signal.
  */
-template<typename ReturnT, typename... ArgsT>
-class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>
-    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>> {
-	using container_type = plf::colony<std::function<ReturnT(ArgsT...)>>;
+template<typename ReturnT, typename... ArgsT, typename AllocatorT>
+class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, AllocatorT>
+    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, AllocatorT>> {
+public:
+	using allocator_type = AllocatorT;
+	using function_type = ReturnT(ArgsT...);
+	using completion_type = std::conditional_t<std::is_same_v<void, ReturnT>, void(), void(std::vector<ReturnT>)>;
+
+private:
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+
+	using element_type = std::function<function_type>;
+	using container_allocator_type = typename alloc_traits::template rebind_alloc<element_type>;
+	using container_type = plf::colony<element_type, container_allocator_type>;
+
+	using working_key_type = typename container_type::const_pointer;
+	using working_element_type = std::pair<working_key_type const, bool>;
+	using working_container_allocator_type = typename alloc_traits::template rebind_alloc<working_element_type>;
+	using working_container_type = std::map<working_key_type, bool, std::less<working_key_type>, working_container_allocator_type>;
+
+	using remove_element_type = typename container_type::const_pointer;
+	using remove_container_allocator_type = typename alloc_traits::template rebind_alloc<remove_element_type>;
+	using remove_container_type = std::vector<remove_element_type, remove_container_allocator_type>;
 
 	struct passkey {
 		explicit passkey() = default;
 	};
 
 public:
-	using completion_type = std::conditional_t<std::is_same_v<void, ReturnT>, void(), void(std::vector<ReturnT>)>;
+	/// Create a std::shared_ptr<async_signal_handler>
+	template<typename... ConstructorArgsT>
+	[[nodiscard]]
+	static auto create(ConstructorArgsT&&... args)
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, AllocatorT>> {
+		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, AllocatorT>>(
+		    passkey{}, std::forward<ConstructorArgsT>(args)...
+		);
+	}
 
-	using function_type = ReturnT(ArgsT...);
+	/// Create a std::shared_ptr<async_signal_handler> using std::allocate_shared
+	template<typename... ConstructorArgsT>
+	[[nodiscard]]
+	static auto allocate(AllocatorT const& allocator, ConstructorArgsT&&... args)
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, AllocatorT>> {
+		return std::allocate_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, AllocatorT>>(
+			allocator, passkey{}, std::forward<ConstructorArgsT>(args)...
+		);
+	}
 
 	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec) : executor(std::move(exec)) {
 	}
 
 	template<typename ExecutionContext>
-	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& exec) : executor(exec.get_executor()) {
+	requires std::convertible_to<ExecutionContext&, boost::asio::execution_context&>
+	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& context) :
+		async_signal_handler(key, context.get_executor()) {
 	}
 
-	async_signal_handler(async_signal_handler const&) = delete;
-	async_signal_handler(async_signal_handler&&) noexcept = default;
+	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec, AllocatorT const& alloc) :
+		allocator(alloc),
+		executor(std::move(exec)) {
+	}
+
+	template<typename ExecutionContext>
+	requires std::convertible_to<ExecutionContext&, boost::asio::execution_context&>
+	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& context, AllocatorT const& alloc) :
+		async_signal_handler(key, context.get_executor(), alloc) {
+	}
+
+	/**
+	 * @brief Construct a new async_signal_handler that holds the same callbacks as another.
+	 *
+	 * @details Connection objects from the original signal handler will still only refer to callbacks in that signal
+	 *          handler.
+	 */
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler const& other) : executor(other.executor) {
+		auto locks = std::scoped_lock{other.callback_mut, other.to_remove_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
+			allocator = alloc_traits::select_on_container_copy_construction(other.allocator);
+		}
+
+		callbacks = container_type{allocator};
+		working_callbacks = working_container_type{allocator};
+		to_remove = remove_container_type{allocator};
+
+		other.remove_invalidated_callbacks();
+
+		callbacks.reserve(other.callbacks.size());
+
+		for (auto const& callback : other.callbacks) {
+			if (std::ranges::find(other.to_remove, &callback) == other.to_remove.end()) {
+				callbacks.insert(callback);
+			}
+		}
+	}
+
+	/**
+	 * @brief Construct a new async_signal_handler that holds the same callbacks as another.
+	 *
+	 * @details Connection objects from the original signal handler will still only refer to callbacks in that signal
+	 *          handler.
+	 */
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler const& other, AllocatorT const& alloc) :
+		allocator(alloc),
+		executor(other.executor) {
+
+		auto locks = std::scoped_lock{other.callback_mut, other.to_remove_mut};
+
+		other.remove_invalidated_callbacks();
+		callbacks.reserve(other.callbacks.size());
+
+		for (auto const& callback : other.callbacks) {
+			if (std::ranges::find(other.to_remove, &callback) == other.to_remove.end()) {
+				callbacks.insert(callback);
+			}
+		}
+	}
+
+	/**
+	 * @brief Construct a new async_signal_handler that will take ownership of another's callbacks
+	 *
+	 * @details Moving from a handler with running callbacks is undefined behavior. Existing connection objects from
+	 *          the original signal handler are invalidated.
+	 */
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler&& other) {
+		auto locks = std::scoped_lock{other.callback_mut, other.to_remove_mut};
+
+		assert(
+			std::ranges::all_of(std::views::values(other.working_callbacks), std::identity{})
+			&& "Can not move from an async_signal_handler with running callbacks"
+		);
+
+		executor = std::move(other.executor);
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		callbacks = container_type{allocator};
+		working_callbacks = working_container_type{allocator};
+		to_remove = remove_container_type{allocator};
+
+		// working_callbacks is not moved from, as moving from a signal handler with working callbacks is not allowed.
+		callbacks = std::move(other.callbacks);
+		to_remove = std::move(other.to_remove);
+	}
+
+	/**
+	 * @brief Construct a new async_signal_handler that will take ownership of another's callbacks
+	 *
+	 * @details Moving from a handler with running callbacks is undefined behavior. Existing connection objects from
+	 *          the original signal handler are invalidated.
+	 */
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler&& other, AllocatorT const& alloc) :
+		allocator(alloc) {
+
+		auto locks = std::scoped_lock{other.callback_mut, other.to_remove_mut};
+
+		assert(
+			std::ranges::all_of(std::views::values(other.working_callbacks), std::identity{})
+			&& "Can not move from an async_signal_handler with running callbacks"
+		);
+
+		executor = std::move(other.executor);
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		// working_callbacks is not moved from, as moving from a signal handler with working callbacks is not allowed.
+		callbacks = std::move(other.callbacks);
+		to_remove = std::move(other.to_remove);
+	}
 
 	~async_signal_handler() = default;
 
-	auto operator=(async_signal_handler const&) -> async_signal_handler& = delete;
-	auto operator=(async_signal_handler&&) noexcept -> async_signal_handler& = default;
+	/**
+	 * @brief Copy the valid callbacks from an async_signal_handler to this one
+	 *
+	 * @details Assigning to an async_signal_handler that has running callbacks is undefined behavior. Existing
+	 *          connection objects from this signal handler are invalidated. Connection objects from the other signal
+	 *          handler will still only refer to callbacks in that signal handler.
+	 */
+	auto operator=(async_signal_handler const& other) -> async_signal_handler& {
+		if (&other == this) {
+			return *this;
+		}
 
-	/// Create an instance of an async_signal_handler
-	template<typename... ConstructorArgsT>
-	[[nodiscard]]
-	static auto create(ConstructorArgsT&&... args)
-	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>> {
-		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::drop>>(
-		    passkey{}, std::forward<ConstructorArgsT>(args)...
+		auto locks = std::scoped_lock{callback_mut, to_remove_mut, other.callback_mut, other.to_remove_mut};
+
+		assert(
+			std::ranges::all_of(std::views::values(working_callbacks), std::identity{})
+			&& "Can not copy to an async_signal_handler with running callbacks"
 		);
+
+		executor = other.executor;
+
+		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
+			allocator = other.allocator;
+		}
+
+		other.remove_invalidated_callbacks();
+		callbacks.reserve(other.callbacks.size());
+
+		for (auto const& callback : other.callbacks) {
+			if (std::ranges::find(other.to_remove, &callback) == other.to_remove.end()) {
+				callbacks.insert(callback);
+			}
+		}
+
+		return *this;
+	}
+
+	/**
+	 * @brief Move the valid callbacks from an async_signal_handler to this one
+	 *
+	 * @details Assigning to an async_signal_handler that has running callbacks is undefined behavior, and moving from
+	 *          one that has running callbacks is undefined behavior. Existing connection objects from both signal
+	 *          handlers are invalidated.
+	 */
+	auto operator=(async_signal_handler&& other) -> async_signal_handler& {
+		if (&other == this) {
+			return *this;
+		}
+
+		auto locks = std::scoped_lock{callback_mut, to_remove_mut, other.callback_mut, other.to_remove_mut};
+
+		assert(
+			std::ranges::all_of(std::views::values(working_callbacks), std::identity{})
+			&& "Can not move to an async_signal_handler with running callbacks"
+		);
+
+		assert(
+			std::ranges::all_of(std::views::values(other.working_callbacks), std::identity{})
+			&& "Can not move from an async_signal_handler with running callbacks"
+		);
+
+		executor = std::move(other.executor);
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		// working_callbacks is not moved from, as moving from a signal handler with working callbacks is not allowed.
+		callbacks = std::move(other.callbacks);
+		to_remove = std::move(other.to_remove);
+
+		return *this;
+	}
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return allocator;
 	}
 
 	/// Get the executor associated with this object
@@ -149,6 +373,7 @@ public:
 		auto const it = callbacks.insert(std::forward<FunctionT>(func));
 		lock.unlock();
 
+		// Add an entry for this callback to the working callback map, with an initial value of false.
 		{
 			auto working_lock = std::scoped_lock{working_callback_mut};
 			working_callbacks[&(*it)] = false;
@@ -268,7 +493,7 @@ public:
 
 		// Initiate the callbacks as a parallel_group, with a completion that takes either nothing if ReturnT is void,
 		// or a vector of the callback results otherwise.
-		return detail::parallel_publish<ReturnT>(executor, std::move(operations), std::move(consigned));
+		return detail::parallel_publish<ReturnT>(executor, std::move(operations), std::move(consigned), allocator);
 	}
 
 private:
@@ -332,20 +557,22 @@ private:
 	}
 
 
+	AllocatorT allocator;
+
 	boost::asio::any_io_executor executor;
 
-	container_type callbacks;
+	container_type callbacks{allocator};
 	std::mutex callback_mut;
 
 	// Tracks the execution state of each callback
-	std::unordered_map<typename container_type::const_pointer, bool> working_callbacks;
+	working_container_type working_callbacks{allocator};
 	std::shared_mutex working_callback_mut;
 
 	// Tracks which callbacks have been disconnected, so they can be removed when they are no longer executing. This
 	// part could be removed if callbacks were stored as std::shared_ptr<std::function<...>>, at the cost of extra
 	// indirection, but that doesn't simplify the design too much since the callback execution state has to be tracked
 	// as well. Manually managing the callback lifetime is only a little extra work.
-	std::vector<typename container_type::const_pointer> to_remove;
+	remove_container_type to_remove{allocator};
 	std::mutex to_remove_mut;
 };
 
@@ -354,27 +581,27 @@ private:
  * @brief A signal handler that invokes callbacks asynchronously. Callbacks that don't finish before a new signal is
  *        published will still be invoked.
  */
-template<typename ReturnT, typename... ArgsT>
-class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>
-    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>> {
-	using container_type = plf::colony<std::shared_ptr<std::function<ReturnT(ArgsT...)>>>;
+template<typename ReturnT, typename... ArgsT, typename AllocatorT>
+class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>
+    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>> {
+public:
+	using allocator_type = AllocatorT;
+	using function_type = ReturnT(ArgsT...);
 	using completion_type = std::conditional_t<std::is_same_v<void, ReturnT>, void(), void(std::vector<ReturnT>)>;
+
+private:
+	using alloc_traits = std::allocator_traits<AllocatorT>;
+
+	using element_type = std::shared_ptr<std::function<function_type>>;
+	using container_allocator_type = typename alloc_traits::template rebind_alloc<element_type>;
+	using container_type = plf::colony<element_type, container_allocator_type>;
 
 	struct passkey {
 		explicit passkey() = default;
 	};
 
 public:
-	using function_type = ReturnT(ArgsT...);
-
-	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec) : executor(std::move(exec)) {
-	}
-
-	template<typename ExecutionContext>
-	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& exec) : executor(exec.get_executor()) {
-	}
-
-	/// Create an instance of an async_signal_handler
+	/// Create a std::shared_ptr<async_signal_handler>
 	template<typename... ConstructorArgsT>
 	[[nodiscard]]
 	static auto create(ConstructorArgsT&&... args)
@@ -382,6 +609,126 @@ public:
 		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>>(
 		    passkey{}, std::forward<ConstructorArgsT>(args)...
 		);
+	}
+
+	/// Create a std::shared_ptr<async_signal_handler> using std::allocate_shared
+	template<typename... ConstructorArgsT>
+	[[nodiscard]]
+	static auto allocate(AllocatorT const& allocator, ConstructorArgsT&&... args)
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>> {
+		return std::allocate_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent>>(
+			allocator, passkey{}, std::forward<ConstructorArgsT>(args)...
+		);
+	}
+
+	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec) : executor(std::move(exec)) {
+	}
+
+	template<typename ExecutionContext>
+	requires std::convertible_to<ExecutionContext&, boost::asio::execution_context&>
+	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& context) :
+		async_signal_handler(key, context.get_executor()) {
+	}
+
+	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec, AllocatorT const& alloc) :
+		allocator(alloc),
+		executor(std::move(exec)) {
+	}
+
+	template<typename ExecutionContext>
+	requires std::convertible_to<ExecutionContext&, boost::asio::execution_context&>
+	async_signal_handler([[maybe_unused]] passkey key, ExecutionContext& context, AllocatorT const& alloc) :
+		async_signal_handler(key, context.get_executor(), alloc) {
+	}
+
+	/// Construct a new async_signal_handler that holds the same callbacks as another
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler const& other) {
+		auto lock = std::shared_lock{other.callback_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
+			allocator = other.allocator;
+		}
+
+		callbacks = other.callbacks;
+	}
+
+	/// Construct a new async_signal_handler that holds the same callbacks as another
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler const& other, AllocatorT const& alloc) :
+		allocator(alloc) {
+		auto lock = std::shared_lock{other.callback_mut};
+		callbacks = other.callbacks;
+	}
+
+	/**
+	 * @brief Construct a new async_signal_handler that will take ownership of another's callbacks
+	 * @details Moving from a handler with running callbacks is undefined behavior.
+	 */
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler&& other) {
+		auto lock = std::scoped_lock{other.callback_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		callbacks = std::move(other.callbacks);
+	}
+
+	/**
+	 * @brief Construct a new async_signal_handler that will take ownership of another's callbacks
+	 * @details Moving from a handler with running callbacks is undefined behavior.
+	 */
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler&& other, AllocatorT const& alloc) {
+		auto lock = std::scoped_lock{other.callbacks_mut};
+		callbacks = container_type{std::move(other.callbacks), allocator};
+	}
+
+	~async_signal_handler() = default;
+
+	/**
+	 * @brief Copy the valid callbacks from an async_signal_handler to this one
+	 * @details Assigning to an async_signal_handler that has running callbacks is undefined behavior
+	 */
+	auto operator=(async_signal_handler const& other) -> async_signal_handler& {
+		if (&other == this) {
+			return *this;
+		}
+
+		auto lock = std::shared_lock{callback_mut, other.callbacks_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
+			allocator = other.allocator;
+		}
+
+		callbacks = other.callbacks;
+
+		return *this;
+	}
+
+	/**
+	 * @brief Move the valid callbacks from an async_signal_handler to this one
+	 *
+	 * @details Assigning to an async_signal_handler that has running callbacks is undefined behavior, and moving from
+	 *          one that has running callbacks is undefined behavior.
+	 */
+	auto operator=(async_signal_handler&& other) -> async_signal_handler& {
+		if (&other == this) {
+			return *this;
+		}
+
+		auto lock = std::scoped_lock{callback_mut, other.callbacks_mut};
+
+		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+			allocator = std::move(other.allocator);
+		}
+
+		callbacks = std::move(other.callbacks);
+
+		return *this;
+	}
+
+	[[nodiscard]]
+	constexpr auto get_allocator() const noexcept -> allocator_type {
+		return allocator;
 	}
 
 	/// Get the executor associated with this object
@@ -511,7 +858,7 @@ public:
 
 		// Initiate the callbacks as a parallel_group, with a completion that takes either nothing if ReturnT is void,
 		// or a vector of the callback results otherwise.
-		return detail::parallel_publish<ReturnT>(executor, std::move(operations), std::move(consigned));
+		return detail::parallel_publish<ReturnT>(executor, std::move(operations), std::move(consigned), allocator);
 	}
 
 private:
@@ -520,10 +867,11 @@ private:
 		callbacks.erase(callbacks.get_iterator(pointer));
 	}
 
+	AllocatorT allocator;
 
 	boost::asio::any_io_executor executor;
 
-	container_type callbacks;
+	container_type callbacks{allocator};
 	std::shared_mutex callback_mut;
 };
 

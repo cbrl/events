@@ -323,10 +323,18 @@ public:
 };
 
 
-template <typename Range> requires (boost::asio::experimental::is_async_operation_range<std::decay_t<Range>>::value != 0)
+template <typename Range>
+requires (boost::asio::experimental::is_async_operation_range<std::decay_t<Range>>::value != 0)
 [[nodiscard]]
 auto make_void_parallel_group(Range&& range) -> void_ranged_parallel_group<std::decay_t<Range>> {
 	return void_ranged_parallel_group<std::decay_t<Range>>(std::forward<Range>(range));
+}
+
+template <typename Range, typename Allocator>
+requires (boost::asio::experimental::is_async_operation_range<std::decay_t<Range>>::value != 0)
+[[nodiscard]]
+auto make_void_parallel_group(Range&& range, Allocator const& allocator) -> void_ranged_parallel_group<std::decay_t<Range>> {
+	return void_ranged_parallel_group<std::decay_t<Range>>(std::forward<Range>(range), allocator);
 }
 
 } //namespace events::detail
