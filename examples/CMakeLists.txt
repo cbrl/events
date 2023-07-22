@@ -22,6 +22,7 @@ endfunction()
 
 add_example(signal_handler)
 add_example(event_dispatcher)
+add_example(synchronized_event_dispatcher)
 add_example(async_event_dispatcher)
 
 add_folders(Example)
