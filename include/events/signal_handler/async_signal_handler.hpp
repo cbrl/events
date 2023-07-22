@@ -9,7 +9,12 @@
 
 namespace events {
 
-template<typename FunctionT, typename PolicyT, typename AllocatorT = std::allocator<void>>
+template<
+	typename FunctionT,
+	typename PolicyT,
+	typename ExecutorT = boost::asio::any_io_executor,
+	typename AllocatorT = std::allocator<void>
+>
 class async_signal_handler;
 
 }  //namespace events

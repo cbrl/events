@@ -21,12 +21,17 @@
 namespace events {
 namespace detail {
 
-template<typename EventT, typename CallbackPolicyT, typename AllocatorT = std::allocator<void>>
+template<
+	typename EventT,
+	typename CallbackPolicyT,
+	typename ExeuctorT = boost::asio::any_io_executor,
+	typename AllocatorT = std::allocator<void>
+>
 class async_discrete_event_dispatcher;
 
 
-template<typename CallbackPolicyT, typename AllocatorT>
-class [[nodiscard]] async_discrete_event_dispatcher<void, CallbackPolicyT, AllocatorT> {
+template<typename CallbackPolicyT, typename ExecutorT, typename AllocatorT>
+class [[nodiscard]] async_discrete_event_dispatcher<void, CallbackPolicyT, ExecutorT, AllocatorT> {
 public:
 	async_discrete_event_dispatcher() = default;
 	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
@@ -45,21 +50,21 @@ public:
 };
 
 
-template<typename EventT, typename CallbackPolicyT, typename AllocatorT>
+template<typename EventT, typename CallbackPolicyT, typename ExecutorT, typename AllocatorT>
 class [[nodiscard]] async_discrete_event_dispatcher final
-    : public async_discrete_event_dispatcher<void, CallbackPolicyT, AllocatorT> {
+    : public async_discrete_event_dispatcher<void, CallbackPolicyT, ExecutorT, AllocatorT> {
 
-	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT, AllocatorT>;
+	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT, ExecutorT, AllocatorT>;
 
 	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
 	using event_container_type = std::vector<EventT, event_allocator_type>;
 
 public:
-	explicit async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec) :
+	explicit async_discrete_event_dispatcher(ExecutorT const& exec) :
 	    handler(signal_handler_type::create(exec)) {
 	}
 
-	async_discrete_event_dispatcher(boost::asio::any_io_executor const& exec, AllocatorT const& allocator) :
+	async_discrete_event_dispatcher(ExecutorT const& exec, AllocatorT const& allocator) :
 		handler(signal_handler_type::allocate(allocator, exec, allocator)),
 		events(allocator) {
 	}
@@ -220,10 +225,14 @@ private:
 /**
  * @brief An @ref event_dispatcher that invokes callbacks asynchronously
  */
-template<typename CallbackPolicyT = callback_policy::concurrent, typename AllocatorT = std::allocator<void>>
+template<
+	typename CallbackPolicyT = callback_policy::concurrent,
+	typename ExecutorT = boost::asio::any_io_executor,
+	typename AllocatorT = std::allocator<void>
+>
 class [[nodiscard]] async_event_dispatcher {
 	template<typename T>
-	using dispatcher_type = detail::async_discrete_event_dispatcher<T, CallbackPolicyT, AllocatorT>;
+	using dispatcher_type = detail::async_discrete_event_dispatcher<T, CallbackPolicyT, ExecutorT, AllocatorT>;
 
 	using alloc_traits = std::allocator_traits<AllocatorT>;
 
@@ -236,21 +245,24 @@ class [[nodiscard]] async_event_dispatcher {
 
 public:
 	using allocator_type = AllocatorT;
+	using executor_type = ExecutorT;
 	using callback_policy = CallbackPolicyT;
 
-	explicit async_event_dispatcher(boost::asio::any_io_executor exec) : executor(std::move(exec)) {
+	explicit async_event_dispatcher(ExecutorT const& exec) : executor(exec) {
 	}
 
 	template<typename ExecutionContext>
+	requires std::convertible_to<ExecutionContext&, boost::asio::execution_context&>
 	explicit async_event_dispatcher(ExecutionContext& context) : async_event_dispatcher(context.get_executor()) {
 	}
 
-	async_event_dispatcher(boost::asio::any_io_executor exec, AllocatorT const& alloc) :
+	async_event_dispatcher(ExecutorT const& exec, AllocatorT const& alloc) :
 		allocator(alloc),
-		executor(std::move(exec)) {
+		executor(exec) {
 	}
 
 	template<typename ExecutionContext>
+	requires std::convertible_to<ExecutionContext&, boost::asio::execution_context&>
 	async_event_dispatcher(ExecutionContext& context, AllocatorT const& alloc) :
 		async_event_dispatcher(context.get_executor(), alloc) {
 	}
@@ -324,6 +336,11 @@ public:
 	[[nodiscard]]
 	constexpr auto get_allocator() const noexcept -> allocator_type {
 		return allocator;
+	}
+
+	[[nodiscard]]
+	auto get_executor() const -> executor_type {
+		return executor;
 	}
 
 	/**
@@ -563,7 +580,7 @@ private:
 
 	AllocatorT allocator;
 
-	boost::asio::any_io_executor executor;
+	ExecutorT executor;
 
 	dispatcher_map_type dispatchers{allocator};
 	std::shared_mutex dispatcher_mut;

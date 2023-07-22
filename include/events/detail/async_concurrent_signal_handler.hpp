@@ -25,7 +25,7 @@
 namespace events {
 
 
-template<typename FunctionT, typename PolicyT, typename AllocatorT>
+template<typename FunctionT, typename PolicyT, typename ExecutorT, typename AllocatorT>
 class async_signal_handler;
 
 
@@ -33,11 +33,12 @@ class async_signal_handler;
  * @brief A signal handler that invokes callbacks asynchronously. Callbacks that don't finish before a new signal is
  *        published will still be invoked.
  */
-template<typename ReturnT, typename... ArgsT, typename AllocatorT>
-class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>
-    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>> {
+template<typename ReturnT, typename... ArgsT, typename ExecutorT, typename AllocatorT>
+class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, ExecutorT, AllocatorT>
+    : public std::enable_shared_from_this<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, ExecutorT, AllocatorT>> {
 public:
 	using allocator_type = AllocatorT;
+	using executor_type = ExecutorT;
 	using function_type = ReturnT(ArgsT...);
 	using completion_type = std::conditional_t<std::is_same_v<void, ReturnT>, void(), void(std::vector<ReturnT>)>;
 
@@ -57,8 +58,9 @@ public:
 	template<typename... ConstructorArgsT>
 	[[nodiscard]]
 	static auto create(ConstructorArgsT&&... args)
-	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>> {
-		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>>(
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, ExecutorT, AllocatorT>> {
+
+		return std::make_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, ExecutorT, AllocatorT>>(
 		    passkey{}, std::forward<ConstructorArgsT>(args)...
 		);
 	}
@@ -67,13 +69,14 @@ public:
 	template<typename... ConstructorArgsT>
 	[[nodiscard]]
 	static auto allocate(AllocatorT const& allocator, ConstructorArgsT&&... args)
-	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>> {
-		return std::allocate_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, AllocatorT>>(
+	    -> std::shared_ptr<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, ExecutorT, AllocatorT>> {
+
+		return std::allocate_shared<async_signal_handler<ReturnT(ArgsT...), callback_policy::concurrent, ExecutorT, AllocatorT>>(
 			allocator, passkey{}, std::forward<ConstructorArgsT>(args)...
 		);
 	}
 
-	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec) : executor(std::move(exec)) {
+	async_signal_handler([[maybe_unused]] passkey key, ExecutorT const& exec) : executor(exec) {
 	}
 
 	template<typename ExecutionContext>
@@ -82,9 +85,9 @@ public:
 		async_signal_handler(key, context.get_executor()) {
 	}
 
-	async_signal_handler([[maybe_unused]] passkey key, boost::asio::any_io_executor exec, AllocatorT const& alloc) :
+	async_signal_handler([[maybe_unused]] passkey key, ExecutorT const& exec, AllocatorT const& alloc) :
 		allocator(alloc),
-		executor(std::move(exec)) {
+		executor(exec) {
 	}
 
 	template<typename ExecutionContext>
@@ -185,7 +188,7 @@ public:
 
 	/// Get the executor associated with this object
 	[[nodiscard]]
-	auto get_executor() -> boost::asio::any_io_executor {
+	auto get_executor() const -> executor_type {
 		return executor;
 	}
 
@@ -321,7 +324,7 @@ private:
 
 	AllocatorT allocator;
 
-	boost::asio::any_io_executor executor;
+	ExecutorT executor;
 
 	container_type callbacks{allocator};
 	std::shared_mutex callback_mut;
