@@ -18,6 +18,8 @@
 #include <events/signal_handler/async_signal_handler.hpp>
 
 
+// NOLINTBEGIN(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
+
 namespace events {
 namespace detail {
 
@@ -241,7 +243,7 @@ class [[nodiscard]] async_event_dispatcher {
 
 	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
 	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
-	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<std::type_index>, dispatcher_allocator_type>;
+	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<>, dispatcher_allocator_type>;
 
 public:
 	using allocator_type = AllocatorT;
@@ -587,3 +589,5 @@ private:
 };
 
 }  //namespace events
+
+// NOLINTEND(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)

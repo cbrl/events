@@ -7,6 +7,7 @@
 // case where completion order does not need to be tracked and no results need to be passed to the
 // completion handler. That is to say: the completion handler should take no arguments.
 
+// NOLINTBEGIN
 
 namespace events::detail {
 
@@ -89,11 +90,11 @@ struct void_ranged_parallel_group_op_handler {
 	using cancellation_slot_type = boost::asio::cancellation_slot;
 
 	void_ranged_parallel_group_op_handler(
-		std::shared_ptr<void_ranged_parallel_group_state<Condition, Handler, Op, Allocator>> state,
-		size_t idx
+		std::shared_ptr<void_ranged_parallel_group_state<Condition, Handler, Op, Allocator>> group_state,
+		size_t op_idx
 	) :
-		state(std::move(state)),
-		idx(idx) {
+		state(std::move(group_state)),
+		idx(op_idx) {
 	}
 
 	auto get_cancellation_slot() const noexcept -> cancellation_slot_type {
@@ -158,12 +159,12 @@ struct void_ranged_parallel_group_op_handler_with_executor : void_ranged_paralle
 	};
 
 	void_ranged_parallel_group_op_handler_with_executor(
-		std::shared_ptr<void_ranged_parallel_group_state<Condition, Handler, Op, Allocator>> state,
+		std::shared_ptr<void_ranged_parallel_group_state<Condition, Handler, Op, Allocator>> group_state,
 		executor_type ex,
-		size_t idx
-	) : void_ranged_parallel_group_op_handler<Condition, Handler, Op, Allocator>(std::move(state), idx) {
+		size_t op_idx
+	) : void_ranged_parallel_group_op_handler<Condition, Handler, Op, Allocator>(std::move(group_state), op_idx) {
 
-		cancel = &this->state->cancellation_signals[idx].slot().template emplace<cancel_proxy>(
+		cancel = &this->state->cancellation_signals[op_idx].slot().template emplace<cancel_proxy>(
 			this->state,
 			std::move(ex)
 		);
@@ -279,8 +280,8 @@ public:
 	using signature = void();
 
 	/// Constructor.
-	explicit void_ranged_parallel_group(Range range, Allocator const& alloc = Allocator()) :
-		range(std::move(range)),
+	explicit void_ranged_parallel_group(Range op_range, Allocator const& alloc = Allocator()) :
+		range(std::move(op_range)),
 		allocator(alloc) {
 	}
 
@@ -339,3 +340,4 @@ auto make_void_parallel_group(Range&& range, Allocator const& allocator) -> void
 
 } //namespace events::detail
 
+// NOLINTEND

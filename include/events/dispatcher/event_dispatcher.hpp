@@ -38,7 +38,6 @@ public:
 
 template<typename EventT, typename AllocatorT>
 class [[nodiscard]] discrete_event_dispatcher final : public discrete_event_dispatcher<void, AllocatorT> {
-private:
 	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
 	using event_container_type = std::vector<EventT, event_allocator_type>;
 
@@ -57,7 +56,7 @@ public:
 		events(std::move(other.events), allocator) {
 	}
 
-	~discrete_event_dispatcher() = default;
+	~discrete_event_dispatcher() override = default;
 
 	auto operator=(discrete_event_dispatcher const&) -> discrete_event_dispatcher& = delete;
 	auto operator=(discrete_event_dispatcher&&) noexcept -> discrete_event_dispatcher& = default;
@@ -123,7 +122,6 @@ private:
  */
 template<typename AllocatorT = std::allocator<void>>
 class [[nodiscard]] event_dispatcher {
-private:
 	using alloc_traits = std::allocator_traits<AllocatorT>;
 
 	using generic_dispatcher = detail::discrete_event_dispatcher<void, AllocatorT>;
@@ -131,7 +129,7 @@ private:
 
 	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
 	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
-	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<std::type_index>, dispatcher_allocator_type>;
+	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<>, dispatcher_allocator_type>;
 
 public:
 	using allocator_type = AllocatorT;

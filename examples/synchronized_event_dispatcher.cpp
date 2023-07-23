@@ -7,7 +7,7 @@
 #include <thread>
 
 
-struct ContrivedEvent {
+struct contrived_event {
 	size_t value;
 };
 
@@ -17,7 +17,7 @@ auto main() -> int {
 	// connect, enqueue, send, and dispatch at once.
 	auto dispatcher = events::synchronized_event_dispatcher{};
 
-	dispatcher.connect<ContrivedEvent>([](auto const& event) {
+	dispatcher.connect<contrived_event>([](auto const& event) {
 		std::cout << "Received an event: " << event.value << '\n';
 	});
 
@@ -28,7 +28,7 @@ auto main() -> int {
 		while (!stop.stop_requested()) {
 			auto const next = counter.fetch_add(1u);
 
-			dispatcher.enqueue<ContrivedEvent>(next);
+			dispatcher.enqueue<contrived_event>(next);
 
 			if ((next % 100) == 0) {
 				dispatcher.dispatch();

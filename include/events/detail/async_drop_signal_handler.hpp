@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <ranges>
 #include <shared_mutex>
 #include <tuple>
 #include <type_traits>
@@ -22,6 +23,8 @@
 #include <events/signal_handler/callback_policy.hpp>
 #include <events/detail/parallel_publish.hpp>
 
+
+// NOLINTBEGIN(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
 
 namespace events {
 
@@ -52,7 +55,7 @@ private:
 	using working_key_type = typename container_type::const_pointer;
 	using working_element_type = std::pair<working_key_type const, bool>;
 	using working_container_allocator_type = typename alloc_traits::template rebind_alloc<working_element_type>;
-	using working_container_type = std::map<working_key_type, bool, std::less<working_key_type>, working_container_allocator_type>;
+	using working_container_type = std::map<working_key_type, bool, std::less<>, working_container_allocator_type>;
 
 	using remove_element_type = typename container_type::const_pointer;
 	using remove_container_allocator_type = typename alloc_traits::template rebind_alloc<remove_element_type>;
@@ -517,3 +520,5 @@ private:
 };
 
 } //namespace events
+
+// NOLINTEND(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)

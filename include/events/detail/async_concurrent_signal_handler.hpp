@@ -22,6 +22,8 @@
 #include <events/detail/parallel_publish.hpp>
 
 
+// NOLINTBEGIN(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
+
 namespace events {
 
 
@@ -132,7 +134,8 @@ public:
 	 * @brief Construct a new async_signal_handler that will take ownership of another's callbacks
 	 * @details Moving from a handler with running callbacks is undefined behavior.
 	 */
-	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler&& other, AllocatorT const& alloc) {
+	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler&& other, AllocatorT const& alloc) :
+		allocator(alloc) {
 		auto lock = std::scoped_lock{other.callbacks_mut};
 		callbacks = container_type{std::move(other.callbacks), allocator};
 	}
@@ -331,3 +334,5 @@ private:
 };
 
 }  //namespace events
+
+// NOLINTEND(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)

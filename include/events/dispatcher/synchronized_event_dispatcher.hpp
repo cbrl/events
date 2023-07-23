@@ -13,6 +13,8 @@
 #include <events/signal_handler/synchronized_signal_handler.hpp>
 
 
+// NOLINTBEGIN(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
+
 namespace events {
 namespace detail {
 
@@ -41,7 +43,6 @@ public:
 
 template<typename EventT, typename AllocatorT>
 class [[nodiscard]] synchronized_discrete_event_dispatcher final : public synchronized_discrete_event_dispatcher<void, AllocatorT> {
-private:
 	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
 	using event_container_type = std::vector<EventT, event_allocator_type>;
 
@@ -65,7 +66,7 @@ public:
 		events = event_container_type{std::move(other.events), alloc};
 	}
 
-	~synchronized_discrete_event_dispatcher() = default;
+	~synchronized_discrete_event_dispatcher() override = default;
 
 	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
 
@@ -150,7 +151,7 @@ class [[nodiscard]] synchronized_event_dispatcher {
 
 	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
 	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
-	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<std::type_index>, dispatcher_allocator_type>;
+	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<>, dispatcher_allocator_type>;
 
 public:
 	using allocator_type = AllocatorT;
@@ -386,3 +387,5 @@ private:
 };
 
 }  //namespace events
+
+// NOLINTEND(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)

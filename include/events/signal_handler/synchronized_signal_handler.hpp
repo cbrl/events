@@ -11,6 +11,8 @@
 #include <events/connection.hpp>
 
 
+// NOLINTBEGIN(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
+
 namespace events {
 
 template<typename FunctionT, typename AllocatorT = std::allocator<void>>
@@ -221,3 +223,5 @@ private:
 };
 
 }  //namespace events
+
+// NOLINTEND(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)

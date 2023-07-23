@@ -22,6 +22,7 @@
 // The following file is a re-implementation of asio::experimental::parallel_group optimzed for the
 // case where completion order does not need to be tracked.
 
+// NOLINTBEGIN
 
 namespace events::detail {
 
@@ -155,11 +156,11 @@ struct ranged_parallel_group_op_handler {
 	using cancellation_slot_type = boost::asio::cancellation_slot;
 
 	ranged_parallel_group_op_handler(
-		std::shared_ptr<ranged_parallel_group_state<Condition, Handler, Op, Allocator>> state,
-		size_t idx
+		std::shared_ptr<ranged_parallel_group_state<Condition, Handler, Op, Allocator>> group_state,
+		size_t op_idx
 	) :
-		state(std::move(state)),
-		idx(idx) {
+		state(std::move(group_state)),
+		idx(op_idx) {
 	}
 
 	auto get_cancellation_slot() const noexcept -> cancellation_slot_type {
@@ -226,12 +227,12 @@ struct ranged_parallel_group_op_handler_with_executor : ranged_parallel_group_op
 	};
 
 	ranged_parallel_group_op_handler_with_executor(
-		std::shared_ptr<ranged_parallel_group_state<Condition, Handler, Op, Allocator>> state,
+		std::shared_ptr<ranged_parallel_group_state<Condition, Handler, Op, Allocator>> group_state,
 		executor_type ex,
-		size_t idx
-	) : ranged_parallel_group_op_handler<Condition, Handler, Op, Allocator>(std::move(state), idx) {
+		size_t op_idx
+	) : ranged_parallel_group_op_handler<Condition, Handler, Op, Allocator>(std::move(group_state), op_idx) {
 
-		cancel = &this->state_->cancellation_signals[idx].slot().template emplace<cancel_proxy>(
+		cancel = &this->state_->cancellation_signals[op_idx].slot().template emplace<cancel_proxy>(
 			this->state_,
 			std::move(ex)
 		);
@@ -344,8 +345,8 @@ private:
 
 public:
 	/// Constructor.
-	explicit ranged_parallel_group(Range range, Allocator const& alloc = Allocator{}) :
-		range(std::move(range)),
+	explicit ranged_parallel_group(Range op_range, Allocator const& alloc = Allocator{}) :
+		range(std::move(op_range)),
 		allocator(alloc) {
 	}
 
@@ -409,3 +410,5 @@ auto make_parallel_group(Range&& range, Allocator const& allocator) -> ranged_pa
 }
 
 } //namespace events::detail
+
+// NOLINTEND

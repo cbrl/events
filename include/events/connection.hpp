@@ -51,6 +51,7 @@ public:
 	scoped_connection(scoped_connection const&) = delete;
 	scoped_connection(scoped_connection&&) noexcept = default;
 
+	//NOLINTNEXTLINE(google-explicit-constructor,hicpp-explicit-conversions)
 	scoped_connection(connection other) : connect(std::move(other)) {
 	}
 
