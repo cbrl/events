@@ -225,7 +225,7 @@ public:
 	template<typename FunctionT>
 	auto connect(FunctionT&& func) -> connection {
 		auto lock = std::unique_lock{callback_mut};
-		auto const it = callbacks.insert(std::make_shared<std::function<function_type>>(std::forward<FunctionT>(func)));
+		auto const it = callbacks.insert(std::allocate_shared<std::function<function_type>>(allocator, std::forward<FunctionT>(func)));
 		lock.unlock();
 
 		return connection{[weak_self = this->weak_from_this(), ptr = &(*it)] {
