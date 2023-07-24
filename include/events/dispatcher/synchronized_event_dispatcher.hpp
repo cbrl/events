@@ -146,7 +146,7 @@ private:
  * @brief A thread-safe @ref event_dispatcher
  */
 template<typename AllocatorT = std::allocator<void>>
-class [[nodiscard]] synchronized_event_dispatcher {
+class [[nodiscard]] basic_synchronized_event_dispatcher {
 	using alloc_traits = std::allocator_traits<AllocatorT>;
 
 	using generic_dispatcher = detail::synchronized_discrete_event_dispatcher<void, AllocatorT>;
@@ -159,12 +159,12 @@ class [[nodiscard]] synchronized_event_dispatcher {
 public:
 	using allocator_type = AllocatorT;
 
-	synchronized_event_dispatcher() = default;
+	basic_synchronized_event_dispatcher() = default;
 
-	explicit synchronized_event_dispatcher(AllocatorT const& alloc) : allocator(alloc) {
+	explicit basic_synchronized_event_dispatcher(AllocatorT const& alloc) : allocator(alloc) {
 	}
 
-	synchronized_event_dispatcher(synchronized_event_dispatcher const&) = delete;
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher const&) = delete;
 
 	/**
 	 * @brief Construct a new synchronized_event_dispatcher that will take ownership of another's signal handlers and
@@ -172,7 +172,7 @@ public:
 	 *
 	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
 	 */
-	synchronized_event_dispatcher(synchronized_event_dispatcher&& other) {
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other) {
 		auto lock = std::scoped_lock{other.dispatcher_mut};
 
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
@@ -183,12 +183,12 @@ public:
 	}
 
 	/**
-	 * @brief Construct a new synchronized_event_dispatcher that will take ownership of another's signal handlers and
+	 * @brief Construct a new basic_synchronized_event_dispatcher that will take ownership of another's signal handlers and
 	 *        enqueued events.
 	 *
 	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
 	 */
-	synchronized_event_dispatcher(synchronized_event_dispatcher&& other, AllocatorT const& alloc) : allocator(alloc) {
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, AllocatorT const& alloc) : allocator(alloc) {
 		auto lock = std::scoped_lock{other.dispatcher_mut};
 
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
@@ -198,17 +198,17 @@ public:
 		dispatchers = dispatcher_map_type{std::move(other.dispatchers), allocator};
 	}
 
-	~synchronized_event_dispatcher() = default;
+	~basic_synchronized_event_dispatcher() = default;
 
-	auto operator=(synchronized_event_dispatcher const&) -> synchronized_event_dispatcher& = delete;
+	auto operator=(basic_synchronized_event_dispatcher const&) -> basic_synchronized_event_dispatcher& = delete;
 
 	/**
-	 * @brief Move a the signal handlers and enqueued events from a synchronized_event_dispatcher into this one
+	 * @brief Move a the signal handlers and enqueued events from a basic_synchronized_event_dispatcher into this one
 	 *
 	 * @details Existing connection objects from this event dispatcher are invalidated. Existing connection objects
 	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
 	 */
-	auto operator=(synchronized_event_dispatcher&& other) -> synchronized_event_dispatcher& {
+	auto operator=(basic_synchronized_event_dispatcher&& other) -> basic_synchronized_event_dispatcher& {
 		if (&other == this) {
 			return *this;
 		}
@@ -396,6 +396,10 @@ private:
 	dispatcher_map_type dispatchers{allocator};
 	mutable std::shared_mutex dispatcher_mut;
 };
+
+
+/// Type alias for a basic_synchronized_event_dispatcher with the default template arguments
+using synchronized_event_dispatcher = basic_synchronized_event_dispatcher<>;
 
 }  //namespace events
 
