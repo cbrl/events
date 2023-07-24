@@ -1,9 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <concepts>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
+#include <ranges>
 #include <shared_mutex>
 #include <typeinfo>
 #include <typeindex>
@@ -333,15 +336,23 @@ public:
 	}
 
 	/**
-	 * @brief Get the number of enqueued events for a specific event type
+	 * @brief Get the number of enqueued events for a specific event type or for all events
 	 *
-	 * @tparam EventT  The type of event to get the count of
+	 * @tparam EventT  The type of event to get the count of. Leave default (void) to obtain the total number of
+	 *                 enqueued events.
 	 *
-	 * @return The number of events of this type that are in the queue
+	 * @return The number of enqueued events
 	 */
-	template<typename EventT>
+	template<typename EventT = void>
 	[[nodiscard]]
 	auto queue_size() const -> size_t {
+		auto lock = std::scoped_lock{dispatcher_mut};
+
+		if constexpr (std::same_as<void, EventT>) {
+			auto sizes = std::views::values(dispatchers) | std::views::transform([](auto const& ptr) { return ptr->size(); });
+			return std::accumulate(std::ranges::begin(sizes), std::ranges::end(sizes), 0ull);
+		}
+
 		auto const key = std::type_index{typeid(EventT)};
 
 		if (auto it = dispatchers.find(key); it != dispatchers.end()) {
@@ -383,7 +394,7 @@ private:
 
 	AllocatorT allocator;
 	dispatcher_map_type dispatchers{allocator};
-	std::shared_mutex dispatcher_mut;
+	mutable std::shared_mutex dispatcher_mut;
 };
 
 }  //namespace events

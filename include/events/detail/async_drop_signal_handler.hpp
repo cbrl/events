@@ -33,8 +33,10 @@ class async_signal_handler;
 
 
 /**
- * @brief A signal handler that invokes callbacks asynchronously. Callbacks that don't finish before a new signal is
- *        published will drop the signal.
+ * @brief An asynchronous variant of @ref signal_handler. Callback invocations will happen on an ASIO executor.
+ *        Callbacks that don't finish before a new signal is published will drop the signal. An ASIO completion token
+ *        may optionally be provided when publishing a signal, which will be invoked once all callbacks have completed.
+ *        If the signal returns values, these will be passed to the completion token.
  */
 template<typename ReturnT, typename... ArgsT, typename ExecutorT, typename AllocatorT>
 class [[nodiscard]] async_signal_handler<ReturnT(ArgsT...), callback_policy::drop, ExecutorT, AllocatorT>
@@ -299,6 +301,31 @@ public:
 	[[nodiscard]]
 	auto get_executor() const -> executor_type {
 		return executor;
+	}
+
+	/// Get the number of callbacks registered with this signal handler
+	[[nodiscard]]
+	auto size() const -> size_t {
+		auto lock = std::scoped_lock{callback_mut};
+		return callbacks.size();
+	}
+
+	/// Disconnect all callbacks
+	auto disconnect_all() -> void {
+		auto locks = std::scoped_lock{callback_mut, working_callback_mut};
+
+		remove_invalidated_callbacks();
+
+		// Remove all callbacks that aren't running, and mark those that are running for deletion.
+		for (auto it = callbacks.begin(); it != callbacks.end();) {
+			if (!working_callbacks.contains(&(*it))) {
+				it = callbacks.erase(it);
+			}
+			else {
+				to_remove.push_back(&(*it));
+				++it;
+			}
+		}
 	}
 
 	/**

@@ -17,7 +17,9 @@ class signal_handler;
 
 
 /**
- * @brief Stores a set of callback functions that will be invoked when the signal is published
+ * @brief A signal handler allows callbacks to be registered which will be invoked when the signal is published.
+ *        Signals can have any function signature, and can also have return values, which will be collected and
+ *        returned to the publisher of the signal.
  */
 template<typename ReturnT, typename... ArgsT, typename AllocatorT>
 class [[nodiscard]] signal_handler<ReturnT(ArgsT...), AllocatorT> {
@@ -87,6 +89,17 @@ public:
 		return callbacks.get_allocator();
 	}
 
+	/// Get the number of callbacks registered with this signal handler
+	[[nodiscard]]
+	auto size() const noexcept -> size_t {
+		return callbacks.size();
+	}
+
+	/// Disconnect all callbacks
+	auto disconnect_all() -> void {
+		callbacks.clear();
+	}
+
 	/**
 	 * @brief Register a callback function that will be invoked when the signal is fired
 	 *
@@ -143,11 +156,6 @@ public:
 		    | std::views::transform([... args = std::forward<ArgsT>(args)](auto& callback) mutable -> ReturnT {
 			       return callback(args...);
 		       });
-	}
-
-	/// Disconnect all callbacks
-	auto disconnect() -> void {
-		callbacks.clear();
 	}
 
 private:

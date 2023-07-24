@@ -20,7 +20,7 @@ class synchronized_signal_handler;
 
 
 /**
- * @brief A thread-safe @ref signal_handler
+ * @brief A thread-safe variant of @ref signal_handler
  */
 template<typename ReturnT, typename... ArgsT, typename AllocatorT>
 class [[nodiscard]] synchronized_signal_handler<ReturnT(ArgsT...), AllocatorT> {
@@ -131,6 +131,13 @@ public:
 		return callbacks.get_allocator();
 	}
 
+	/// Get the number of callbacks registered with this signal handler
+	[[nodiscard]]
+	auto size() const noexcept -> size_t {
+		auto lock = std::scoped_lock{callback_mut};
+		return callbacks.size();
+	}
+
 	/**
 	 * @brief Register a callback function that will be invoked when the signal is fired
 	 *
@@ -147,6 +154,13 @@ public:
 		lock.unlock();
 
 		return connection{[this, ptr = &(*it)] { disconnect(ptr); }};
+	}
+
+	/// Disconnect all callbacks
+	auto disconnect_all() -> void {
+		auto lock = std::scoped_lock{callback_mut};
+		callbacks.clear();
+		to_erase.clear();
 	}
 
 	/**
@@ -185,13 +199,6 @@ public:
 		}
 
 		return results;
-	}
-
-	/// Disconnect all callbacks
-	auto disconnect() -> void {
-		auto lock = std::scoped_lock{callback_mut};
-		callbacks.clear();
-		to_erase.clear();
 	}
 
 private:
