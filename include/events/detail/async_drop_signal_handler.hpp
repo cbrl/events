@@ -110,6 +110,9 @@ public:
 		async_signal_handler(key, context.get_executor(), alloc) {
 	}
 
+	/// The normal copy constructor is disabled so that users are forced to go through the create() method
+	async_signal_handler(async_signal_handler const&) = delete;
+
 	/**
 	 * @brief Construct a new async_signal_handler that holds the same callbacks as another.
 	 *
@@ -482,7 +485,6 @@ private:
 	auto prune_callbacks_and_get_pending() -> std::vector<typename container_type::pointer> {
 		// This will be populated with the callbacks that need to be executed
 		auto pending_callbacks = std::vector<typename container_type::pointer>{};
-		pending_callbacks.reserve(callbacks.size() - working_callbacks.size());  //reserve an estimate of the final size
 
 		auto working_lock = std::scoped_lock{callback_mut, working_callback_mut};
 

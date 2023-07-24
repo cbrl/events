@@ -111,6 +111,9 @@ public:
 		callbacks = other.callbacks;
 	}
 
+	/// The normal copy constructor is disabled so that users are forced to go through the create() method
+	async_signal_handler(async_signal_handler const&) = delete;
+
 	/// Construct a new async_signal_handler that holds the same callbacks as another
 	async_signal_handler([[maybe_unused]] passkey key, async_signal_handler const& other, AllocatorT const& alloc) :
 		allocator(alloc) {
