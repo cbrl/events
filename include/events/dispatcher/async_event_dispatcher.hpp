@@ -157,7 +157,7 @@ public:
 	}
 
 	auto async_send(EventT const& event) -> void {
-		handler->async_publish(event, boost::asio::detached);
+		handler->async_publish(event);
 	}
 
 	template<boost::asio::completion_token_for<void()> CompletionToken>
