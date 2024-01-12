@@ -282,7 +282,7 @@ public:
 
 		for (auto& callback_ptr : callbacks) {
 			boost::asio::post(executor, [self = this->shared_from_this(), callback_ptr, args_tuple]() mutable {
-				(void)std::apply(*callback_ptr, args_tuple);
+				(void)std::apply(*callback_ptr, *args_tuple);
 			});
 		}
 	}
