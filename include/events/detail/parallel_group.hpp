@@ -232,18 +232,18 @@ struct ranged_parallel_group_op_handler_with_executor : ranged_parallel_group_op
 		size_t op_idx
 	) : ranged_parallel_group_op_handler<Condition, Handler, Op, Allocator>(std::move(group_state), op_idx) {
 
-		cancel = &this->state_->cancellation_signals[op_idx].slot().template emplace<cancel_proxy>(
-			this->state_,
+		cancel = &this->state->cancellation_signals[op_idx].slot().template emplace<cancel_proxy>(
+			this->state,
 			std::move(ex)
 		);
 	}
 
 	auto get_cancellation_slot() const noexcept -> cancellation_slot_type {
-		return cancel->signal_.slot();
+		return cancel->signal.slot();
 	}
 
 	auto get_executor() const noexcept -> executor_type {
-		return cancel->executor_;
+		return cancel->executor;
 	}
 
 	cancel_proxy* cancel;

@@ -208,7 +208,7 @@ private:
 		}
 
 		auto default_exec = handler->get_executor();
-		return detail::parallel_publish<void>(
+		return detail::parallel_publish<void()>(
 			default_exec,
 			std::move(operations),
 			std::forward<CompletionToken>(completion),
@@ -527,7 +527,7 @@ public:
 			operations.emplace_back(initiate(*dispatcher));
 		}
 
-		return detail::parallel_publish<void>(
+		return detail::parallel_publish<void()>(
 		    executor,
 			std::move(operations),
 			std::forward<CompletionToken>(completion),

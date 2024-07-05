@@ -334,7 +334,12 @@ public:
 
 		// Initiate the callbacks as a parallel_group, with a completion that takes either nothing if ReturnT is void,
 		// or a vector of the callback results otherwise.
-		return detail::parallel_publish<ReturnT>(executor, std::move(operations), std::move(consigned), allocator);
+		return detail::parallel_publish<completion_type>(
+			executor,
+			std::move(operations),
+			std::move(consigned),
+			allocator
+		);
 	}
 
 private:
