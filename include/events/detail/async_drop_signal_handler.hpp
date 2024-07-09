@@ -399,7 +399,7 @@ public:
 		for (auto& [ptr, callback] : pending_callbacks) {
 			boost::asio::post(executor, [self = this->shared_from_this(), ptr, callback = std::move(callback), args_tuple]() mutable {
 				(void)std::apply(*callback, *args_tuple);
-				release_callback(ptr, std::move(callback));
+				self->release_callback(ptr, std::move(callback));
 			});
 		}
 	}

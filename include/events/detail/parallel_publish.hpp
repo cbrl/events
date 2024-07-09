@@ -47,17 +47,15 @@ struct invoke_helper<void()> {
  */
 template<typename Signature, typename Operations, typename CompletionToken, typename Allocator>
 auto parallel_publish(
-	auto default_executor,
+	auto const& default_executor,
 	Operations&& operations,
 	CompletionToken&& completion_token,
 	Allocator const& allocator
 ) {
 	auto initiation = [&default_executor, &allocator, ops = std::forward<Operations>(operations)](auto completion_handler) mutable {
 		if (ops.empty()) {
-			auto completion_ex = boost::asio::get_associated_executor(completion_handler, default_executor);
-
 			boost::asio::post(
-				completion_ex,
+				default_executor,
 				[handler = std::move(completion_handler)]() mutable {
 					invoke_helper<Signature>::invoke_default(std::move(handler));
 				}
