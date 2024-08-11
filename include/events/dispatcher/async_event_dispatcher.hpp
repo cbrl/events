@@ -27,15 +27,14 @@ namespace detail {
 
 template<
 	typename EventT,
-	typename CallbackPolicyT,
 	typename ExeuctorT = boost::asio::any_io_executor,
 	typename AllocatorT = std::allocator<void>
 >
 class async_discrete_event_dispatcher;
 
 
-template<typename CallbackPolicyT, typename ExecutorT, typename AllocatorT>
-class [[nodiscard]] async_discrete_event_dispatcher<void, CallbackPolicyT, ExecutorT, AllocatorT> {
+template<typename ExecutorT, typename AllocatorT>
+class [[nodiscard]] async_discrete_event_dispatcher<void, ExecutorT, AllocatorT> {
 public:
 	async_discrete_event_dispatcher() = default;
 	async_discrete_event_dispatcher(async_discrete_event_dispatcher const&) = delete;
@@ -54,22 +53,22 @@ public:
 };
 
 
-template<typename EventT, typename CallbackPolicyT, typename ExecutorT, typename AllocatorT>
+template<typename EventT, typename ExecutorT, typename AllocatorT>
 class [[nodiscard]] async_discrete_event_dispatcher final
-    : public async_discrete_event_dispatcher<void, CallbackPolicyT, ExecutorT, AllocatorT> {
+    : public async_discrete_event_dispatcher<void, ExecutorT, AllocatorT> {
 
-	using signal_handler_type = async_signal_handler<void(EventT const&), CallbackPolicyT, ExecutorT, AllocatorT>;
+	using signal_handler_type = async_signal_handler<void(EventT), ExecutorT, AllocatorT>;
 
 	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
 	using event_container_type = std::vector<EventT, event_allocator_type>;
 
 public:
 	explicit async_discrete_event_dispatcher(ExecutorT const& exec) :
-	    handler(signal_handler_type::create(exec)) {
+	    handler(exec) {
 	}
 
 	async_discrete_event_dispatcher(ExecutorT const& exec, AllocatorT const& allocator) :
-		handler(signal_handler_type::allocate(allocator, exec, allocator)),
+		handler(exec, allocator),
 		events(allocator) {
 	}
 
@@ -105,7 +104,7 @@ public:
 
 	template<std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
-		return handler->connect(std::forward<FunctionT>(callback));
+		return handler.connect(std::forward<FunctionT>(callback));
 	}
 
 	auto dispatch() -> void override {
@@ -114,8 +113,8 @@ public:
 		events.clear();
 		lock.unlock();
 
-		for (auto const& event : to_publish) {
-			handler->publish(event);
+		for (auto&& event : to_publish) {
+			handler.publish(std::move(event));
 		}
 	}
 
@@ -123,46 +122,43 @@ public:
 		// Moving the vector and iterating over a local one allows events to be enqueued during iteration. Storing the
 		// vector in a shared_ptr allows the vector to be kept alive until all of the callbacks have completed.
 		auto lock = std::unique_lock{events_mut};
-		auto to_publish = std::make_shared<std::vector<EventT>>(std::move(events));
+		auto to_publish = std::move(events);
 		events.clear();
 		lock.unlock();
 
-		for (auto const& event : *to_publish) {
-			handler->async_publish(event, boost::asio::consign(boost::asio::detached, to_publish));
+		for (auto&& event : to_publish) {
+			handler.async_publish(std::move(event));
 		}
 	}
 
 	auto async_dispatch(boost::asio::any_completion_handler<void()> completion) -> void override {
 		auto lock = std::unique_lock{events_mut};
-		auto to_publish = std::make_shared<std::vector<EventT>>(std::move(events));
+		auto to_publish = std::move(events);
 		events.clear();
 		lock.unlock();
 
-		return parallel_publish(
-		    std::span{*to_publish},
-		    [user_completion = std::move(completion), to_publish](auto&&...) mutable { std::move(user_completion)(); }
-		);
+		return parallel_publish(std::move(to_publish), std::move(completion));
 	}
 
 	auto send(EventT const& event) -> void {
-		handler->publish(event);
+		handler.publish(event);
 	}
 
 	template<std::ranges::range RangeT>
 	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
 	auto send(RangeT const& range) -> void {
 		for (auto&& event : range) {
-			handler->publish(event);
+			handler.publish(event);
 		}
 	}
 
 	auto async_send(EventT const& event) -> void {
-		handler->async_publish(event);
+		handler.async_publish(event);
 	}
 
 	template<boost::asio::completion_token_for<void()> CompletionToken>
 	auto async_send(EventT const& event, CompletionToken&& completion) {
-		return handler->async_publish(event, std::forward<CompletionToken>(completion));
+		return handler.async_publish(event, std::forward<CompletionToken>(completion));
 	}
 
 	template<std::ranges::range RangeT, boost::asio::completion_token_for<void()> CompletionToken>
@@ -196,28 +192,33 @@ public:
 
 private:
 	// Publish a set of events using a parallel_group with a single completion that is invoked when all callbacks finish
-	template<std::convertible_to<EventT> U, boost::asio::completion_token_for<void()> CompletionToken>
-	auto parallel_publish(std::span<U> to_publish, CompletionToken&& completion) {
-		using op_type = decltype(handler->async_publish(std::declval<EventT>(), boost::asio::deferred));
+	template<std::ranges::range Range, boost::asio::completion_token_for<void()> CompletionToken>
+	requires std::convertible_to<std::ranges::range_value_t<Range>, EventT>
+	auto parallel_publish(Range&& to_publish, CompletionToken&& completion) {
+		using op_type = decltype(handler.async_publish(std::declval<EventT>(), boost::asio::deferred));
+
+		// Pass events as const reference if the range was an lvalue reference, or move otherwise (range was rvalue reference)
+		using value_type = std::ranges::range_value_t<Range>;
+		using forward_type = std::conditional_t<std::is_lvalue_reference_v<Range>, value_type const&, value_type&&>;
 
 		auto operations = std::vector<op_type>{};
 		operations.reserve(to_publish.size());
 
 		for (auto&& event : to_publish) {
-			operations.emplace_back(handler->async_publish(event, boost::asio::deferred));
+			operations.emplace_back(handler.async_publish(static_cast<forward_type>(event), boost::asio::deferred));
 		}
 
-		auto default_exec = handler->get_executor();
+		auto default_exec = handler.get_executor();
 		return detail::parallel_publish<void()>(
 			default_exec,
 			std::move(operations),
 			std::forward<CompletionToken>(completion),
-			handler->get_allocator()
+			handler.get_allocator()
 		);
 	}
 
 
-	std::shared_ptr<signal_handler_type> handler;
+	signal_handler_type handler;
 
 	event_container_type events;
 	std::mutex events_mut;
@@ -229,14 +230,10 @@ private:
 /**
  * @brief An @ref event_dispatcher that invokes callbacks asynchronously
  */
-template<
-	typename CallbackPolicyT = callback_policy::concurrent,
-	typename ExecutorT = boost::asio::any_io_executor,
-	typename AllocatorT = std::allocator<void>
->
+template<typename ExecutorT = boost::asio::any_io_executor, typename AllocatorT = std::allocator<void>>
 class [[nodiscard]] async_event_dispatcher {
 	template<typename T>
-	using dispatcher_type = detail::async_discrete_event_dispatcher<T, CallbackPolicyT, ExecutorT, AllocatorT>;
+	using dispatcher_type = detail::async_discrete_event_dispatcher<T, ExecutorT, AllocatorT>;
 
 	using alloc_traits = std::allocator_traits<AllocatorT>;
 
@@ -250,7 +247,6 @@ class [[nodiscard]] async_event_dispatcher {
 public:
 	using allocator_type = AllocatorT;
 	using executor_type = ExecutorT;
-	using callback_policy = CallbackPolicyT;
 
 	explicit async_event_dispatcher(ExecutorT const& exec) : executor(exec) {
 	}

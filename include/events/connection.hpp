@@ -13,7 +13,7 @@ class connection {
 	template<typename, typename>
 	friend class synchronized_signal_handler;
 
-	template<typename, typename, typename, typename>
+	template<typename, typename, typename>
 	friend class async_signal_handler;
 
 	explicit connection(std::function<void()> function) : disconnect_function(std::move(function)) {

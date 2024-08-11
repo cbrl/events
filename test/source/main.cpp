@@ -130,12 +130,10 @@ auto main() -> int {
 		auto dispatcher = events::event_dispatcher{};
 		auto sync_dispatcher = events::synchronized_event_dispatcher{};
 		auto async_dispatcher = events::async_event_dispatcher{ctx};
-		auto async_drop_dispatcher = events::async_event_dispatcher<events::callback_policy::drop>{ctx};
 
 		threaded_test<event_count * thread_count, 1>(dispatcher);
 		threaded_test<event_count, thread_count>(sync_dispatcher);
 		threaded_test<event_count, thread_count>(async_dispatcher);
-		threaded_test<event_count, thread_count>(async_drop_dispatcher);
 
 		for (auto& thread : threads) {
 			thread.request_stop();
