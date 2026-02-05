@@ -48,7 +48,7 @@ struct ranged_parallel_group_signature;
 
 template <typename R, typename... Args, typename Allocator>
 struct ranged_parallel_group_signature<R(Args...), Allocator> {
-	using type = R(std::vector<Args, rebind_alloc<Allocator, Args>>...);
+	using type = R(std::vector<std::decay_t<Args>, rebind_alloc<Allocator, std::decay_t<Args>>>...);
 };
 
 
@@ -94,7 +94,11 @@ struct ranged_parallel_group_completion_handler {
 		>::type;
 
 		// Construct all result vectors using the supplied allocator.
-		auto vectors = vectors_type{std::tuple_element_t<I, vectors_type>(rebind_alloc<Allocator, int>(allocator))...};
+		auto vectors = vectors_type{
+			std::tuple_element_t<I, vectors_type>(
+				rebind_alloc<Allocator, typename std::tuple_element_t<I, vectors_type>::value_type>(allocator)
+			)...
+		};
 
 		// Reserve sufficient space in each of the result vectors.
 		(std::get<I>(vectors).reserve(args.size()), ...);

@@ -22,7 +22,7 @@ auto main() -> int {
 	// usage pattern can cause much higher memory usage in situations where very large numbers of events are expected.
 	dispatcher.async_dispatch();
 	context.run();
-	context.reset();
+	context.restart();
 
 	for (int i = 10; i < 20; ++i) {
 		dispatcher.enqueue<int>(i);
@@ -35,7 +35,7 @@ auto main() -> int {
 		std::cout << "Dispatch completed\n" << std::flush;
 	});
 	context.run();
-	context.reset();
+	context.restart();
 
 	return 0;
 }

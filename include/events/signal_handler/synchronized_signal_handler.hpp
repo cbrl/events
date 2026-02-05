@@ -197,16 +197,17 @@ public:
 			if (callback_lock) {
 				auto const it = callbacks.insert(std::forward<FunctionT>(callback));
 				callback_ptr = &(*it);
+				
+				auto handle_lock = std::scoped_lock{handle_mut};
+				handles[handle] = callback_ptr;
 			}
 			else {
 				auto add_lock = std::scoped_lock{add_mut};
 				to_add.emplace_back(handle, std::forward<FunctionT>(callback));
+				
+				auto handle_lock = std::scoped_lock{handle_mut};
+				handles[handle] = callback_ptr;
 			}
-		}
-
-		{
-			auto handle_lock = std::scoped_lock{handle_mut};
-			handles[handle] = callback_ptr;
 		}
 
 		return connection{[this, handle] { disconnect(handle); }};
@@ -214,8 +215,10 @@ public:
 
 	/// Disconnect all callbacks
 	auto disconnect_all() -> void {
-		auto lock = std::scoped_lock{callback_mut};
+		auto lock = std::scoped_lock{callback_mut, handle_mut, add_mut, erase_mut};
 		callbacks.clear();
+		handles.clear();
+		to_add.clear();
 		to_erase.clear();
 	}
 
@@ -251,10 +254,10 @@ public:
 		erase_expired_callbacks();
 
 		auto results = std::vector<ReturnT>{};
-		results.reserve(callbacks.size());
 
 		{
 			auto lock = std::shared_lock{callback_mut};
+			results.reserve(callbacks.size());
 
 			for (auto& callback : callbacks) {
 				results.emplace_back(callback(args...));
@@ -288,7 +291,7 @@ private:
 
 			// If the handle doesn't exist in the handle map, then this callback was disconnected before it could be
 			// inserted into the callback list. In this case, just skip it.
-			if (it != handles.end()) {
+			if (it == handles.end()) {
 				continue;
 			}
 
@@ -313,6 +316,11 @@ private:
 	auto erase_expired_callbacks_impl() -> void {
 		for (auto handle : to_erase) {
 			auto const it = handles.find(handle);
+
+			// If the handle doesn't exist, it was already disconnected (e.g., duplicate disconnect). Skip it.
+			if (it == handles.end()) {
+				continue;
+			}
 
 			// The pointer will be null if the callback is still pending insertion. Nothing special needs to be done
 			// in this case other than skipping the actual callback deletion. This case will be detected and the

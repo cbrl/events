@@ -20,6 +20,9 @@ class signal_handler;
  * @brief A signal handler allows callbacks to be registered which will be invoked when the signal is published.
  *        Signals can have any function signature, and can also have return values, which will be collected and
  *        returned to the publisher of the signal.
+ *
+ * @note Arguments are taken as specified in the function signature. You must explicitly use references in the
+ *       signature if you want the publish method to take arguments by reference.
  */
 template<typename ReturnT, typename... ArgsT, typename AllocatorT>
 class [[nodiscard]] signal_handler<ReturnT(ArgsT...), AllocatorT> {

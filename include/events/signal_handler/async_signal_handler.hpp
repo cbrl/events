@@ -80,6 +80,7 @@ public:
 			allocator = other.allocator;
 		}
 
+		executor = other.executor;
 		callbacks = other.callbacks;
 	}
 
@@ -87,6 +88,7 @@ public:
 	async_signal_handler(async_signal_handler const& other, AllocatorT const& alloc) :
 		allocator(alloc) {
 		auto lock = std::shared_lock{other.callback_mut};
+		executor = other.executor;
 		callbacks = other.callbacks;
 	}
 
@@ -101,6 +103,7 @@ public:
 			allocator = std::move(other.allocator);
 		}
 
+		executor = std::move(other.executor);
 		callbacks = std::move(other.callbacks);
 	}
 
@@ -110,7 +113,8 @@ public:
 	 */
 	async_signal_handler(async_signal_handler&& other, AllocatorT const& alloc) :
 		allocator(alloc) {
-		auto lock = std::scoped_lock{other.callbacks_mut};
+		auto lock = std::scoped_lock{other.callback_mut};
+		executor = std::move(other.executor);
 		callbacks = container_type{std::move(other.callbacks), allocator};
 	}
 
@@ -125,12 +129,14 @@ public:
 			return *this;
 		}
 
-		auto lock = std::shared_lock{callback_mut, other.callbacks_mut};
+		auto lock1 = std::scoped_lock{callback_mut};
+		auto lock2 = std::shared_lock{other.callback_mut};
 
 		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
 			allocator = other.allocator;
 		}
 
+		executor = other.executor;
 		callbacks = other.callbacks;
 
 		return *this;
@@ -147,12 +153,14 @@ public:
 			return *this;
 		}
 
-		auto lock = std::scoped_lock{callback_mut, other.callbacks_mut};
+		auto lock1 = std::scoped_lock{callback_mut};
+		auto lock2 = std::scoped_lock{other.callback_mut};
 
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
 			allocator = std::move(other.allocator);
 		}
 
+		executor = std::move(other.executor);
 		callbacks = std::move(other.callbacks);
 
 		return *this;
@@ -193,8 +201,10 @@ public:
 	 */
 	template<typename FunctionT>
 	auto connect(FunctionT&& func) -> connection {
+		auto callback_ptr = std::allocate_shared<std::function<function_type>>(allocator, std::forward<FunctionT>(func));
+
 		auto lock = std::unique_lock{callback_mut};
-		auto const it = callbacks.insert(std::allocate_shared<std::function<function_type>>(allocator, std::forward<FunctionT>(func)));
+		auto const it = callbacks.insert(callback_ptr);
 		lock.unlock();
 
 		return connection{[this, ptr = &(*it)] {
@@ -243,13 +253,16 @@ public:
 	 * @param args The signal arguments
 	 */
 	auto async_publish(ArgsT... args) -> void {
-		auto args_tuple = std::tuple<ArgsT...>(std::forward<ArgsT>(args)...);
+		auto args_payload = std::allocate_shared<const std::tuple<ArgsT...>>(
+			allocator,
+			std::forward<ArgsT>(args)...
+		);
 
 		auto lock = std::shared_lock{callback_mut};
 
 		for (auto& callback_ptr : callbacks) {
-			boost::asio::post(executor, [callback_ptr, args_tuple]() mutable {
-				(void)std::apply(*callback_ptr, std::move(args_tuple));
+			boost::asio::post(executor, [callback_ptr, args_payload]() {
+				(void)std::apply(*callback_ptr, *args_payload);
 			});
 		}
 	}
@@ -263,18 +276,21 @@ public:
 	template<typename CompletionToken>
 	auto async_publish(ArgsT... args, CompletionToken&& completion) {
 		// Store the arguments in a tuple, which will be referenced by each async operation.
-		auto args_tuple = std::tuple<ArgsT...>(std::forward<ArgsT>(args)...);
+		auto args_payload = std::allocate_shared<std::tuple<ArgsT...> const>(
+			allocator,
+			std::forward<ArgsT>(args)...
+		);
 
-		// This will post a function which will invoke the callback then re-add itself to the list of pending callbacks
-		// once it has completed. The actual operation is deferred to be later executed as part of a parallel_group.
-		auto post_op = [this, &args_tuple](typename container_type::reference callback_ptr) {
-			auto execute = [callback_ptr, args_tuple]() mutable {
+		// This lambda will post a task to the executor which will invoke the callback. The actual operation is
+		// deferred to be later executed as part of a parallel_group.
+		auto post_op = [this, &args_payload](typename container_type::reference callback_ptr) {
+			auto execute = [callback_ptr, args_payload]() {
 				if constexpr (std::same_as<void, ReturnT>) {
-					std::apply(*callback_ptr, std::move(args_tuple));
+					std::apply(*callback_ptr, *args_payload);
 					return boost::asio::deferred_t::values(std::monostate{});  //needs to return a value
 				}
 				else {
-					auto result = std::apply(*callback_ptr, std::move(args_tuple));
+					auto result = std::apply(*callback_ptr, *args_payload);
 					return boost::asio::deferred_t::values(std::move(result));
 				}
 			};
@@ -284,9 +300,9 @@ public:
 
 		using post_op_type = decltype(post_op(std::declval<typename container_type::reference>()));
 		auto operations = std::vector<post_op_type>{};
-		operations.reserve(callbacks.size());
 
 		auto lock = std::shared_lock{callback_mut};
+		operations.reserve(callbacks.size());
 
 		// Create a deferred callback invocation for each callback
 		for (auto& ptr : callbacks) {
@@ -306,7 +322,10 @@ public:
 private:
 	auto disconnect(typename container_type::const_pointer pointer) -> void {
 		auto lock = std::scoped_lock{callback_mut};
-		callbacks.erase(callbacks.get_iterator(pointer));
+		auto const it = callbacks.get_iterator(pointer);
+		if (it != callbacks.end() && *it == *pointer) {
+			callbacks.erase(callbacks.get_iterator(pointer));
+		}
 	}
 
 	AllocatorT allocator;
