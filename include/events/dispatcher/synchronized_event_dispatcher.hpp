@@ -129,6 +129,7 @@ public:
 	}
 
 	auto size() -> size_t override {
+		auto lock = std::scoped_lock{events_mut};
 		return events.size();
 	}
 
@@ -329,8 +330,21 @@ public:
 
 	/// Dispatch all events in the queue
 	auto dispatch() -> void {
-		auto lock = std::shared_lock{dispatcher_mut};
-		for (auto& [type, dispatcher] : dispatchers) {
+		// Take a snapshot of the current dispatchers to avoid holding dispatcher_mut while invoking user callbacks. A
+		// callback may enqueue/send a new event type, which requires upgrading to an exclusive lock to create a new
+		// dispatcher. Holding a shared lock here would deadlock (publisher thread waits for callback; callback waits
+		// for unique_lock).
+		using snapshot_alloc_type = typename alloc_traits::template rebind_alloc<generic_dispatcher_pointer>;
+		auto snapshot = std::vector<generic_dispatcher_pointer, snapshot_alloc_type>{snapshot_alloc_type{allocator}};
+		{
+			auto lock = std::shared_lock{dispatcher_mut};
+			snapshot.reserve(dispatchers.size());
+			for (auto const& [type, dispatcher] : dispatchers) {
+				snapshot.push_back(dispatcher);
+			}
+		}
+
+		for (auto const& dispatcher : snapshot) {
 			dispatcher->dispatch();
 		}
 	}
@@ -346,7 +360,7 @@ public:
 	template<typename EventT = void>
 	[[nodiscard]]
 	auto queue_size() const -> size_t {
-		auto lock = std::scoped_lock{dispatcher_mut};
+		auto lock = std::shared_lock{dispatcher_mut};
 
 		if constexpr (std::same_as<void, EventT>) {
 			auto sizes = std::views::values(dispatchers) | std::views::transform([](auto const& ptr) { return ptr->size(); });

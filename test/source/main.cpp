@@ -2,10 +2,13 @@
 #include <events/dispatcher/synchronized_event_dispatcher.hpp>
 #include <events/dispatcher/async_event_dispatcher.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <format>
 #include <iostream>
 #include <numeric>
+#include <string>
 #include <thread>
 
 

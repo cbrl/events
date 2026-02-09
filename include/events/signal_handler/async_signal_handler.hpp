@@ -6,13 +6,10 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include <plf_colony.h>
 
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
@@ -26,7 +23,7 @@
 namespace events {
 
 
-template<typename FunctionT, typename ExecutorT, typename AllocatorT>
+template<typename FunctionT, typename ExecutorT = boost::asio::any_io_executor, typename AllocatorT = std::allocator<void>>
 class async_signal_handler;
 
 
@@ -47,9 +44,37 @@ public:
 private:
 	using alloc_traits = std::allocator_traits<AllocatorT>;
 
-	using element_type = std::shared_ptr<std::function<function_type>>;
-	using container_allocator_type = typename alloc_traits::template rebind_alloc<element_type>;
-	using container_type = plf::colony<element_type, container_allocator_type>;
+	using callback_type = std::function<function_type>;
+	using callback_ptr = std::shared_ptr<callback_type>;
+
+	using snapshot_element_alloc_type = typename alloc_traits::template rebind_alloc<callback_ptr>;
+	using snapshot_type = std::vector<callback_ptr, snapshot_element_alloc_type>;
+	using snapshot_ptr = std::shared_ptr<snapshot_type const>;
+
+	// Wrapper for callback operation invocation for use with parallel_group
+	struct callback_op {
+		ExecutorT exec;
+		callback_ptr callback;
+		std::shared_ptr<std::tuple<ArgsT...> const> args_payload;
+
+		using executor_type = ExecutorT;
+		auto get_executor() const -> executor_type { return exec; }
+
+		template<typename Handler>
+		auto operator()(Handler&& handler) && -> void {
+			auto execute = [callback = std::move(callback), args_payload = std::move(args_payload), handler = std::forward<Handler>(handler)]() mutable {
+				if constexpr (std::same_as<void, ReturnT>) {
+					std::apply(*callback, *args_payload);
+					std::move(handler)(std::monostate{});
+				}
+				else {
+					auto result = std::apply(*callback, *args_payload);
+					std::move(handler)(std::move(result));
+				}
+			};
+			boost::asio::post(exec, std::move(execute));
+		}
+	};
 
 public:
 	async_signal_handler(ExecutorT const& exec) : executor(exec) {
@@ -74,22 +99,22 @@ public:
 
 	/// Construct a new async_signal_handler that holds the same callbacks as another
 	async_signal_handler(async_signal_handler const& other) {
-		auto lock = std::shared_lock{other.callback_mut};
+		auto lock = std::scoped_lock{other.mutex};
 
 		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
 			allocator = other.allocator;
 		}
 
 		executor = other.executor;
-		callbacks = other.callbacks;
+		snapshot = other.snapshot;
 	}
 
 	/// Construct a new async_signal_handler that holds the same callbacks as another
 	async_signal_handler(async_signal_handler const& other, AllocatorT const& alloc) :
 		allocator(alloc) {
-		auto lock = std::shared_lock{other.callback_mut};
+		auto lock = std::scoped_lock{other.mutex};
 		executor = other.executor;
-		callbacks = other.callbacks;
+		snapshot = other.snapshot;
 	}
 
 	/**
@@ -97,14 +122,14 @@ public:
 	 * @details Moving from a handler with running callbacks is undefined behavior.
 	 */
 	async_signal_handler(async_signal_handler&& other) {
-		auto lock = std::scoped_lock{other.callback_mut};
+		auto lock = std::scoped_lock{other.mutex};
 
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
 			allocator = std::move(other.allocator);
 		}
 
 		executor = std::move(other.executor);
-		callbacks = std::move(other.callbacks);
+		snapshot = std::move(other.snapshot);
 	}
 
 	/**
@@ -113,9 +138,9 @@ public:
 	 */
 	async_signal_handler(async_signal_handler&& other, AllocatorT const& alloc) :
 		allocator(alloc) {
-		auto lock = std::scoped_lock{other.callback_mut};
+		auto lock = std::scoped_lock{other.mutex};
 		executor = std::move(other.executor);
-		callbacks = container_type{std::move(other.callbacks), allocator};
+		snapshot = other.snapshot; // Can't move since we need to use our own allocator
 	}
 
 	~async_signal_handler() = default;
@@ -129,15 +154,14 @@ public:
 			return *this;
 		}
 
-		auto lock1 = std::scoped_lock{callback_mut};
-		auto lock2 = std::shared_lock{other.callback_mut};
+		auto lock1 = std::scoped_lock{mutex, other.mutex};
 
 		if constexpr (alloc_traits::propagate_on_container_copy_assignment::value) {
 			allocator = other.allocator;
 		}
 
 		executor = other.executor;
-		callbacks = other.callbacks;
+		snapshot = other.snapshot;
 
 		return *this;
 	}
@@ -153,15 +177,14 @@ public:
 			return *this;
 		}
 
-		auto lock1 = std::scoped_lock{callback_mut};
-		auto lock2 = std::scoped_lock{other.callback_mut};
+		auto lock1 = std::scoped_lock{mutex, other.mutex};
 
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
 			allocator = std::move(other.allocator);
 		}
 
 		executor = std::move(other.executor);
-		callbacks = std::move(other.callbacks);
+		snapshot = std::move(other.snapshot);
 
 		return *this;
 	}
@@ -180,14 +203,14 @@ public:
 	/// Get the number of callbacks registered with this signal handler
 	[[nodiscard]]
 	auto size() const -> size_t {
-		auto lock = std::scoped_lock{callback_mut};
-		return callbacks.size();
+		auto lock = std::scoped_lock{mutex};
+		return snapshot ? snapshot->size() : 0;
 	}
 
 	/// Disconnect all callbacks
 	auto disconnect_all() -> void {
-		auto lock = std::scoped_lock{callback_mut};
-		callbacks.clear();
+		auto lock = std::scoped_lock{mutex};
+		snapshot.reset();
 	}
 
 	/**
@@ -201,15 +224,17 @@ public:
 	 */
 	template<typename FunctionT>
 	auto connect(FunctionT&& func) -> connection {
-		auto callback_ptr = std::allocate_shared<std::function<function_type>>(allocator, std::forward<FunctionT>(func));
+		auto cb = std::allocate_shared<callback_type>(allocator, std::forward<FunctionT>(func));
+		auto* raw = cb.get();
 
-		auto lock = std::unique_lock{callback_mut};
-		auto const it = callbacks.insert(callback_ptr);
-		lock.unlock();
+		{
+			auto lock = std::scoped_lock{mutex};
+			auto new_snap = copy_snapshot();
+			new_snap.push_back(std::move(cb));
+			snapshot = make_snapshot(std::move(new_snap));
+		}
 
-		return connection{[this, ptr = &(*it)] {
-			this->disconnect(ptr);
-		}};
+		return connection{[this, raw] { disconnect(raw); }};
 	}
 
 	/**
@@ -219,10 +244,13 @@ public:
 	 */
 	auto publish(ArgsT... args) -> void requires std::same_as<void, ReturnT>
 	{
-		auto lock = std::shared_lock{callback_mut};
+		auto snap = acquire_snapshot();
+		if (!snap) {
+			return;
+		}
 
-		for (auto& callback_ptr : callbacks) {
-			(*callback_ptr)(args...);
+		for (auto const& cb : *snap) {
+			(*cb)(args...);
 		}
 	}
 
@@ -235,13 +263,17 @@ public:
 	 */
 	auto publish(ArgsT... args) -> std::vector<ReturnT> requires(!std::same_as<void, ReturnT>)
 	{
-		auto lock = std::shared_lock{callback_mut};
+		auto snap = acquire_snapshot();
 
 		auto results = std::vector<ReturnT>{};
-		results.reserve(callbacks.size());
+		if (!snap) {
+			return results;
+		}
 
-		for (auto& callback_ptr : callbacks) {
-			results.emplace_back((*callback_ptr)(args...));
+		results.reserve(snap->size());
+
+		for (auto const& cb : *snap) {
+			results.emplace_back((*cb)(args...));
 		}
 
 		return results;
@@ -258,11 +290,14 @@ public:
 			std::forward<ArgsT>(args)...
 		);
 
-		auto lock = std::shared_lock{callback_mut};
+		auto snap = acquire_snapshot();
+		if (!snap) {
+			return;
+		}
 
-		for (auto& callback_ptr : callbacks) {
-			boost::asio::post(executor, [callback_ptr, args_payload]() {
-				(void)std::apply(*callback_ptr, *args_payload);
+		for (auto const& cb : *snap) {
+			boost::asio::post(executor, [cb, args_payload]() {
+				(void)std::apply(*cb, *args_payload);
 			});
 		}
 	}
@@ -281,32 +316,27 @@ public:
 			std::forward<ArgsT>(args)...
 		);
 
-		// This lambda will post a task to the executor which will invoke the callback. The actual operation is
-		// deferred to be later executed as part of a parallel_group.
-		auto post_op = [this, &args_payload](typename container_type::reference callback_ptr) {
-			auto execute = [callback_ptr, args_payload]() {
-				if constexpr (std::same_as<void, ReturnT>) {
-					std::apply(*callback_ptr, *args_payload);
-					return boost::asio::deferred_t::values(std::monostate{});  //needs to return a value
-				}
-				else {
-					auto result = std::apply(*callback_ptr, *args_payload);
-					return boost::asio::deferred_t::values(std::move(result));
-				}
-			};
+		using operations_allocator_type = typename alloc_traits::template rebind_alloc<callback_op>;
+		auto operations = std::vector<callback_op, operations_allocator_type>{operations_allocator_type{allocator}};
 
-			return boost::asio::post(executor, boost::asio::deferred(std::move(execute)));
-		};
+		auto snap = acquire_snapshot();
+		if (!snap) {
+			// No callbacks, complete immediately with empty results
+			if constexpr (std::same_as<void, ReturnT>) {
+				boost::asio::post(executor, std::forward<CompletionToken>(completion));
+			} else {
+				boost::asio::post(executor, [completion = std::forward<CompletionToken>(completion)]() mutable {
+					std::move(completion)(std::vector<ReturnT>{});
+				});
+			}
+			return;
+		}
 
-		using post_op_type = decltype(post_op(std::declval<typename container_type::reference>()));
-		auto operations = std::vector<post_op_type>{};
+		operations.reserve(snap->size());
 
-		auto lock = std::shared_lock{callback_mut};
-		operations.reserve(callbacks.size());
-
-		// Create a deferred callback invocation for each callback
-		for (auto& ptr : callbacks) {
-			operations.emplace_back(post_op(ptr));
+		// Create a callback operation for each registered callback
+		for (auto const& cb : *snap) {
+			operations.emplace_back(executor, cb, args_payload);
 		}
 
 		// Initiate the callbacks as a parallel_group, with a completion that takes either nothing if ReturnT is void,
@@ -320,20 +350,55 @@ public:
 	}
 
 private:
-	auto disconnect(typename container_type::const_pointer pointer) -> void {
-		auto lock = std::scoped_lock{callback_mut};
-		auto const it = callbacks.get_iterator(pointer);
-		if (it != callbacks.end() && *it == *pointer) {
-			callbacks.erase(callbacks.get_iterator(pointer));
+	auto disconnect(callback_type* raw) -> void {
+		auto lock = std::scoped_lock{mutex};
+		if (!snapshot) {
+			return;
 		}
+
+		auto new_snap = snapshot_type{snapshot_element_alloc_type{allocator}};
+		new_snap.reserve(snapshot->size());
+
+		bool found = false;
+
+		for (auto const& cb : *snapshot) {
+			if (!found && cb.get() == raw) {
+				found = true;
+				continue;
+			}
+			new_snap.push_back(cb);
+		}
+
+		if (!found) {
+			return;
+		}
+
+		snapshot = new_snap.empty() ? nullptr : make_snapshot(std::move(new_snap));
+	}
+
+	[[nodiscard]]
+	auto acquire_snapshot() const -> snapshot_ptr {
+		auto lock = std::scoped_lock{mutex};
+		return snapshot;
+	}
+
+	[[nodiscard]]
+	auto copy_snapshot() const -> snapshot_type {
+		if (snapshot) {
+			return snapshot_type{*snapshot, snapshot_element_alloc_type{allocator}};
+		}
+		return snapshot_type{snapshot_element_alloc_type{allocator}};
+	}
+
+	[[nodiscard]]
+	auto make_snapshot(snapshot_type snap) const -> snapshot_ptr {
+		return std::allocate_shared<snapshot_type>(allocator, std::move(snap));
 	}
 
 	AllocatorT allocator;
-
 	ExecutorT executor;
-
-	container_type callbacks{allocator};
-	std::shared_mutex callback_mut;
+	snapshot_ptr snapshot;
+	mutable std::mutex mutex;
 };
 
 }  //namespace events

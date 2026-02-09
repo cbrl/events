@@ -4,6 +4,7 @@
 #include <concepts>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <ranges>
 #include <shared_mutex>
@@ -61,6 +62,20 @@ class [[nodiscard]] async_discrete_event_dispatcher final
 
 	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
 	using event_container_type = std::vector<EventT, event_allocator_type>;
+
+	// Wrapper for async publish operations
+	struct publish_op {
+		EventT event;
+		signal_handler_type* handler_ptr;
+
+		using executor_type = ExecutorT;
+		auto get_executor() const -> executor_type { return handler_ptr->get_executor(); }
+
+		template<typename Handler>
+		auto operator()(Handler&& handler) && -> void {
+			handler_ptr->async_publish(std::move(event), std::forward<Handler>(handler));
+		}
+	};
 
 public:
 	explicit async_discrete_event_dispatcher(ExecutorT const& exec) :
@@ -195,17 +210,17 @@ private:
 	template<std::ranges::range Range, boost::asio::completion_token_for<void()> CompletionToken>
 	requires std::convertible_to<std::ranges::range_value_t<Range>, EventT>
 	auto parallel_publish(Range&& to_publish, CompletionToken&& completion) {
-		using op_type = decltype(handler.async_publish(std::declval<EventT>(), boost::asio::deferred));
-
 		// Pass events as const reference if the range was an lvalue reference, or move otherwise (range was rvalue reference)
+		// TODO: can use std::forward_like when this project uses C++23
 		using value_type = std::ranges::range_value_t<Range>;
 		using forward_type = std::conditional_t<std::is_lvalue_reference_v<Range>, value_type const&, value_type&&>;
 
-		auto operations = std::vector<op_type>{};
+		using operations_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<publish_op>;
+		auto operations = std::vector<publish_op, operations_allocator_type>{operations_allocator_type{handler.get_allocator()}};
 		operations.reserve(to_publish.size());
 
 		for (auto&& event : to_publish) {
-			operations.emplace_back(handler.async_publish(static_cast<forward_type>(event), boost::asio::deferred));
+			operations.emplace_back(EventT{static_cast<forward_type>(event)}, &handler);
 		}
 
 		auto default_exec = handler.get_executor();
@@ -240,9 +255,26 @@ class [[nodiscard]] async_event_dispatcher {
 	using generic_dispatcher = dispatcher_type<void>;
 	using generic_dispatcher_pointer = std::shared_ptr<generic_dispatcher>;
 
+	using dispatcher_snapshot_allocator_type = typename alloc_traits::template rebind_alloc<generic_dispatcher_pointer>;
+	using dispatcher_snapshot_type = std::vector<generic_dispatcher_pointer, dispatcher_snapshot_allocator_type>;
+
 	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
 	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
 	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<>, dispatcher_allocator_type>;
+
+	// A wrapper around individual dispatcher operations for use with parallel_group
+	struct dispatch_op {
+		generic_dispatcher* ptr;
+		ExecutorT exec;
+
+		using executor_type = ExecutorT;
+		auto get_executor() const -> executor_type { return exec; }
+
+		template<typename Handler>
+		void operator()(Handler&& handler) && {
+			ptr->async_dispatch(boost::asio::any_completion_handler<void()>(std::forward<Handler>(handler)));
+		}
+	};
 
 public:
 	using allocator_type = AllocatorT;
@@ -477,16 +509,16 @@ public:
 
 	/// Dispatch all events in the queue synchronously
 	auto dispatch() -> void {
-		auto lock = std::shared_lock{dispatcher_mut};
-		for (auto& [type, dispatcher] : dispatchers) {
+		auto snapshot = take_dispatcher_snapshot();
+		for (auto& dispatcher : snapshot) {
 			dispatcher->dispatch();
 		}
 	}
 
 	/// Dispatch all events in the queue asynchronously
 	auto async_dispatch() -> void {
-		auto lock = std::shared_lock{dispatcher_mut};
-		for (auto& [type, dispatcher] : dispatchers) {
+		auto snapshot = take_dispatcher_snapshot();
+		for (auto& dispatcher : snapshot) {
 			dispatcher->async_dispatch();
 		}
 	}
@@ -506,21 +538,14 @@ public:
 	 */
 	template<boost::asio::completion_token_for<void()> CompletionToken>
 	auto async_dispatch(CompletionToken&& completion) {
-		auto lock = std::shared_lock{dispatcher_mut};
+		auto snapshot = take_dispatcher_snapshot();
 
-		auto initiate = [](dispatcher_type<void>& dispatcher) {
-			return boost::asio::async_initiate<decltype(boost::asio::deferred), void()>(
-			    [&dispatcher](auto handler) mutable { dispatcher.async_dispatch(std::move(handler)); },
-			    boost::asio::deferred
-			);
-		};
+		using operations_allocator_type = typename alloc_traits::template rebind_alloc<dispatch_op>;
+		auto operations = std::vector<dispatch_op, operations_allocator_type>{operations_allocator_type{allocator}};
+		operations.reserve(snapshot.size());
 
-		using op_type = decltype(initiate(std::declval<dispatcher_type<void>&>()));
-		auto operations = std::vector<op_type>{};
-		operations.reserve(dispatchers.size());
-
-		for (auto& [type, dispatcher] : dispatchers) {
-			operations.emplace_back(initiate(*dispatcher));
+		for (auto& dispatcher : snapshot) {
+			operations.emplace_back(dispatcher.get(), executor);
 		}
 
 		return detail::parallel_publish<void()>(
@@ -542,7 +567,7 @@ public:
 	template<typename EventT = void>
 	[[nodiscard]]
 	auto queue_size() const -> size_t {
-		auto lock = std::scoped_lock{dispatcher_mut};
+		auto lock = std::shared_lock{dispatcher_mut};
 
 		if constexpr (std::same_as<void, EventT>) {
 			auto sizes = std::views::values(dispatchers) | std::views::transform([](auto const& ptr) { return ptr->size(); });
@@ -559,6 +584,16 @@ public:
 	}
 
 private:
+	auto take_dispatcher_snapshot() const -> dispatcher_snapshot_type {
+		auto lock = std::shared_lock{dispatcher_mut};
+		auto snapshot = dispatcher_snapshot_type{dispatcher_snapshot_allocator_type{allocator}};
+		snapshot.reserve(dispatchers.size());
+		for (auto const& [type, dispatcher] : dispatchers) {
+			snapshot.push_back(dispatcher);
+		}
+		return snapshot;
+	}
+
 	template<typename EventT>
 	auto get_or_create_dispatcher() -> dispatcher_type<EventT>& {
 		auto const key = std::type_index{typeid(EventT)};
