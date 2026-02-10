@@ -260,8 +260,7 @@ public:
 	 */
 	template<typename EventT>
 	auto send(EventT&& event) -> void {
-		using event_type = std::remove_cvref_t<EventT>;
-		get_or_create_dispatcher<event_type>().send(std::forward<EventT>(event));
+		get_or_create_dispatcher<EventT>().send(std::forward<EventT>(event));
 	}
 
 	/**
@@ -315,7 +314,7 @@ public:
 			return std::accumulate(std::ranges::begin(sizes), std::ranges::end(sizes), 0ull);
 		}
 
-		auto const key = std::type_index{typeid(EventT)};
+		auto const key = std::type_index{typeid(std::remove_cvref_t<EventT>)};
 
 		if (auto it = dispatchers.find(key); it != dispatchers.end()) {
 			return it->second->size();
@@ -326,10 +325,11 @@ public:
 
 private:
 	template<typename EventT>
-	auto get_or_create_dispatcher() -> detail::discrete_event_dispatcher<EventT, AllocatorT>& {
-		using derived_type = detail::discrete_event_dispatcher<EventT, AllocatorT>;
+	auto get_or_create_dispatcher() -> detail::discrete_event_dispatcher<std::remove_cvref_t<EventT>, AllocatorT>& {
+		using event_type = std::remove_cvref_t<EventT>;
+		using derived_type = detail::discrete_event_dispatcher<event_type, AllocatorT>;
 
-		auto const [iter, inserted] = dispatchers.try_emplace(std::type_index{typeid(EventT)});
+		auto const [iter, inserted] = dispatchers.try_emplace(std::type_index{typeid(event_type)});
 
 		if (inserted) {
 			iter->second = std::allocate_shared<derived_type>(allocator, allocator);

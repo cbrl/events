@@ -296,8 +296,7 @@ public:
 	 */
 	template<typename EventT>
 	auto send(EventT&& event) -> void {
-		using event_type = std::remove_cvref_t<EventT>;
-		get_or_create_dispatcher<event_type>().send(std::forward<EventT>(event));
+		get_or_create_dispatcher<EventT>().send(std::forward<EventT>(event));
 	}
 
 	/**
@@ -378,10 +377,11 @@ public:
 
 private:
 	template<typename EventT>
-	auto get_or_create_dispatcher() -> detail::synchronized_discrete_event_dispatcher<EventT, AllocatorT>& {
-		using derived_dispatcher_type = detail::synchronized_discrete_event_dispatcher<EventT, AllocatorT>;
+	auto get_or_create_dispatcher() -> detail::synchronized_discrete_event_dispatcher<std::remove_cvref_t<EventT>, AllocatorT>& {
+		using event_type = std::remove_cvref_t<EventT>;
+		using derived_dispatcher_type = detail::synchronized_discrete_event_dispatcher<event_type, AllocatorT>;
 
-		auto const key = std::type_index{typeid(EventT)};
+		auto const key = std::type_index{typeid(event_type)};
 
 		// Attempt to find an existing dispatcher
 		{
