@@ -10,7 +10,8 @@
       "name": "dev-mode",
       "hidden": true,
       "cacheVariables": {
-        "events_DEVELOPER_MODE": "ON"
+        "events_DEVELOPER_MODE": "ON",
+        "VCPKG_MANIFEST_FEATURES": "test;benchmark"
       }
     },
     {

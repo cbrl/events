@@ -49,6 +49,15 @@ if(PROJECT_IS_TOP_LEVEL)
   endif()
 endif()
 
+# ---- Benchmarks ----
+
+if(PROJECT_IS_TOP_LEVEL)
+  option(BUILD_BENCHMARKS "Build benchmark tree." "${events_DEVELOPER_MODE}")
+  if(BUILD_BENCHMARKS)
+    add_subdirectory(benchmark)
+  endif()
+endif()
+
 # ---- Developer mode ----
 
 if(NOT events_DEVELOPER_MODE)

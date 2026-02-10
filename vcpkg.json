@@ -3,5 +3,21 @@
   "version-semver": "0.1.0",
   "dependencies": [
 	"plf-colony"
-  ]
+  ],
+  "default-features": [],
+  "features": {
+    "test": {
+      "description": "Dependencies for testing",
+      "dependencies": [
+          "catch2"
+      ]
+    },
+    "benchmark": {
+      "description": "Dependencies for benchmarking",
+      "dependencies": [
+          "fmt",
+          "tabulate"
+      ]
+    }
+  }
 }
