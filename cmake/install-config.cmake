@@ -1,6 +1,5 @@
 include(CMakeFindDependencyMacro)
 
-find_dependency(Boost)
 find_path(PLF_COLONY_INCLUDE_DIRS "plf_colony.h")
 
 include("${CMAKE_CURRENT_LIST_DIR}/eventsTargets.cmake")

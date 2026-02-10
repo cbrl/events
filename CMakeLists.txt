@@ -13,7 +13,6 @@ project(
 include(cmake/project-is-top-level.cmake)
 include(cmake/variables.cmake)
 
-find_package(Boost REQUIRED)
 find_path(PLF_COLONY_INCLUDE_DIRS "plf_colony.h")
 
 # ---- Declare library ----
@@ -34,8 +33,6 @@ target_include_directories(
 )
 
 target_compile_features(events_events INTERFACE cxx_std_20)
-
-target_link_libraries(events_events INTERFACE Boost::boost)
 
 # ---- Install rules ----
 
