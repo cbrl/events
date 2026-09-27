@@ -7,8 +7,7 @@ for any user-defined event type. These events can be either enqueued for later d
 all listeners.
 
 Variants of both the `signal_handler` and `event_dispatcher` are provided for use in single-threaded and multi-threaded
-applications. Additionally, a variant of each is provided that integrates with ASIO to allow easily dispatching
-listeners to an execution context with support for ASIO's completion tokens.
+applications.
 
 ```cpp
 auto sigh = events::signal_handler<void(int)>{};

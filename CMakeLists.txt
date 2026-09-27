@@ -5,15 +5,13 @@ include(cmake/prelude.cmake)
 project(
     events
     VERSION 0.1.0
-    DESCRIPTION "Short description"
-    HOMEPAGE_URL "https://example.com/"
+    DESCRIPTION "Signal handlers and event dispatchers for C++20"
+    HOMEPAGE_URL "https://github.com/cbrl/events"
     LANGUAGES NONE
 )
 
 include(cmake/project-is-top-level.cmake)
 include(cmake/variables.cmake)
-
-find_path(PLF_COLONY_INCLUDE_DIRS "plf_colony.h")
 
 # ---- Declare library ----
 
@@ -29,7 +27,6 @@ target_include_directories(
     events_events ${warning_guard}
     INTERFACE
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
-	"$<BUILD_INTERFACE:${PLF_COLONY_INCLUDE_DIRS}>"
 )
 
 target_compile_features(events_events INTERFACE cxx_std_20)

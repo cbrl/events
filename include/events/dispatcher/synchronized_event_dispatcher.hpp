@@ -1,11 +1,10 @@
 #pragma once
 
-#include <algorithm>
 #include <concepts>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <numeric>
+#include <optional>
 #include <ranges>
 #include <shared_mutex>
 #include <typeinfo>
@@ -16,7 +15,7 @@
 #include <events/signal_handler/synchronized_signal_handler.hpp>
 
 
-// NOLINTBEGIN(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
+// NOLINTBEGIN(hicpp-noexcept-move,performance-noexcept-move-constructor)
 
 namespace events {
 namespace detail {
@@ -30,17 +29,16 @@ class [[nodiscard]] synchronized_discrete_event_dispatcher<void, AllocatorT> {
 public:
 	synchronized_discrete_event_dispatcher() = default;
 	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher const&) = delete;
-	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&&) noexcept = default;
+	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&&) = delete;
 
 	virtual ~synchronized_discrete_event_dispatcher() = default;
 
 	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
-	auto operator=(synchronized_discrete_event_dispatcher&&) noexcept
-	    -> synchronized_discrete_event_dispatcher& = default;
+	auto operator=(synchronized_discrete_event_dispatcher&&) -> synchronized_discrete_event_dispatcher& = delete;
 
 	virtual auto dispatch() -> void = 0;
 	virtual auto clear() -> void = 0;
-	virtual auto size() -> size_t = 0;
+	[[nodiscard]] virtual auto size() const -> size_t = 0;
 };
 
 
@@ -50,34 +48,7 @@ class [[nodiscard]] synchronized_discrete_event_dispatcher final : public synchr
 	using event_container_type = std::vector<EventT, event_allocator_type>;
 
 public:
-	synchronized_discrete_event_dispatcher() = default;
-
 	explicit synchronized_discrete_event_dispatcher(AllocatorT const& alloc) : handler(alloc), events(alloc) {
-	}
-
-	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher const&) = delete;
-
-	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&& other) {
-		auto lock = std::scoped_lock{other.events_mut};
-		handler = std::move(other.handler);
-		events = std::move(other.events);
-	}
-
-	synchronized_discrete_event_dispatcher(synchronized_discrete_event_dispatcher&& other, AllocatorT const& alloc) {
-		auto lock = std::scoped_lock{other.events_mut};
-		handler = decltype(handler){std::move(other.handler), alloc};
-		events = event_container_type{std::move(other.events), alloc};
-	}
-
-	~synchronized_discrete_event_dispatcher() override = default;
-
-	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
-
-	auto operator=(synchronized_discrete_event_dispatcher&& other) -> synchronized_discrete_event_dispatcher& {
-		auto lock = std::scoped_lock{events_mut, other.events_mut};
-		handler = std::move(other.handler);
-		events = std::move(other.events);
-		return *this;
 	}
 
 	template<std::invocable<EventT const&> FunctionT>
@@ -101,8 +72,8 @@ public:
 		handler.publish(event);
 	}
 
-	template<std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto send(RangeT&& range) -> void {
 		for (auto&& event : range) {
 			handler.publish(event);
@@ -116,11 +87,14 @@ public:
 		events.emplace_back(std::forward<ArgsT>(args)...);
 	}
 
-	template<std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto enqueue(RangeT&& range) -> void {
+		// vector::insert(pos, first, last) requires a common range with C++17-style iterators, so append manually
 		auto lock = std::scoped_lock{events_mut};
-		events.insert(events.end(), std::ranges::begin(range), std::ranges::end(range));
+		for (auto&& event : range) {
+			events.emplace_back(std::forward<decltype(event)>(event));
+		}
 	}
 
 	auto clear() -> void override {
@@ -128,7 +102,7 @@ public:
 		events.clear();
 	}
 
-	auto size() -> size_t override {
+	[[nodiscard]] auto size() const -> size_t override {
 		auto lock = std::scoped_lock{events_mut};
 		return events.size();
 	}
@@ -137,7 +111,7 @@ private:
 	synchronized_signal_handler<void(EventT const&), AllocatorT> handler;
 
 	event_container_type events;
-	std::mutex events_mut;
+	mutable std::mutex events_mut;
 };
 
 }  //namespace detail
@@ -157,6 +131,8 @@ class [[nodiscard]] basic_synchronized_event_dispatcher {
 	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
 	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<>, dispatcher_allocator_type>;
 
+	using lock_type = std::unique_lock<std::shared_mutex>;
+
 public:
 	using allocator_type = AllocatorT;
 
@@ -173,14 +149,8 @@ public:
 	 *
 	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
 	 */
-	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other) {
-		auto lock = std::scoped_lock{other.dispatcher_mut};
-
-		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
-			allocator = std::move(other.allocator);
-		}
-
-		dispatchers = std::move(other.dispatchers);
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other) :
+		basic_synchronized_event_dispatcher(std::move(other), lock_type{other.dispatcher_mut}) {
 	}
 
 	/**
@@ -189,14 +159,8 @@ public:
 	 *
 	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
 	 */
-	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, AllocatorT const& alloc) : allocator(alloc) {
-		auto lock = std::scoped_lock{other.dispatcher_mut};
-
-		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
-			allocator = std::move(other.allocator);
-		}
-
-		dispatchers = dispatcher_map_type{std::move(other.dispatchers), allocator};
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, AllocatorT const& alloc) :
+		basic_synchronized_event_dispatcher(std::move(other), alloc, lock_type{other.dispatcher_mut}) {
 	}
 
 	~basic_synchronized_event_dispatcher() = default;
@@ -204,9 +168,9 @@ public:
 	auto operator=(basic_synchronized_event_dispatcher const&) -> basic_synchronized_event_dispatcher& = delete;
 
 	/**
-	 * @brief Move a the signal handlers and enqueued events from a basic_synchronized_event_dispatcher into this one
+	 * @brief Move the signal handlers and enqueued events from a basic_synchronized_event_dispatcher into this one
 	 *
-	 * @details Existing connection objects from this event dispatcher are invalidated. Existing connection objects
+	 * @details Existing connection objects from this event dispatcher are disconnected. Existing connection objects
 	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
 	 */
 	auto operator=(basic_synchronized_event_dispatcher&& other) -> basic_synchronized_event_dispatcher& {
@@ -214,7 +178,12 @@ public:
 			return *this;
 		}
 
+		// Destroyed after the locks are released, since destroying callbacks may run code that uses this dispatcher
+		auto previous = std::optional<dispatcher_map_type>{};
+
 		auto locks = std::scoped_lock{dispatcher_mut, other.dispatcher_mut};
+
+		previous.emplace(std::move(dispatchers));
 
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
 			allocator = std::move(other.allocator);
@@ -265,7 +234,7 @@ public:
 	 * @tparam EventT  The type of event to enqueue
 	 * @tparam ArgsT
 	 *
-	 * @param args The arguments requires to construct an instance of this event
+	 * @param args The arguments required to construct an instance of this event
 	 */
 	template<typename EventT, typename... ArgsT>
 	requires std::constructible_from<EventT, ArgsT...>
@@ -279,10 +248,10 @@ public:
 	 * @tparam EventT  The type of event to enqueue
 	 * @tparam RangeT
 	 *
-	 * @param args The range of events to enqueue
+	 * @param range The range of events to enqueue
 	 */
-	template<typename EventT, std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<typename EventT, std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto enqueue(RangeT&& range) -> void {
 		get_or_create_dispatcher<EventT>().enqueue(std::forward<RangeT>(range));
 	}
@@ -292,7 +261,7 @@ public:
 	 *
 	 * @tparam EventT  The type of event to send
 	 *
-	 * @param args  An instance of the event to send
+	 * @param event  An instance of the event to send
 	 */
 	template<typename EventT>
 	auto send(EventT&& event) -> void {
@@ -305,12 +274,12 @@ public:
 	 * @tparam EventT  The type of event to send
 	 * @tparam ArgsT
 	 *
-	 * @param args  The arguments requires to construct an instance of this event
+	 * @param args  The arguments required to construct an instance of this event
 	 */
 	template<typename EventT, typename... ArgsT>
 	requires std::constructible_from<EventT, ArgsT...>
 	auto send(ArgsT&&... args) -> void {
-		get_or_create_dispatcher<EventT>().send(EventT{std::forward<ArgsT>(args)...});
+		get_or_create_dispatcher<EventT>().send(EventT(std::forward<ArgsT>(args)...));
 	}
 
 	/**
@@ -319,10 +288,10 @@ public:
 	 * @tparam EventT  The type of event to send
 	 * @tparam RangeT
 	 *
-	 * @param args The range of events to send
+	 * @param range The range of events to send
 	 */
-	template<typename EventT, std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<typename EventT, std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto send(RangeT&& range) -> void {
 		get_or_create_dispatcher<EventT>().send(std::forward<RangeT>(range));
 	}
@@ -362,20 +331,36 @@ public:
 		auto lock = std::shared_lock{dispatcher_mut};
 
 		if constexpr (std::same_as<void, EventT>) {
-			auto sizes = std::views::values(dispatchers) | std::views::transform([](auto const& ptr) { return ptr->size(); });
-			return std::accumulate(std::ranges::begin(sizes), std::ranges::end(sizes), 0ull);
+			auto total = size_t{0};
+			for (auto const& [type, dispatcher] : dispatchers) {
+				total += dispatcher->size();
+			}
+			return total;
 		}
+		else {
+			auto const key = std::type_index{typeid(std::remove_cvref_t<EventT>)};
 
-		auto const key = std::type_index{typeid(EventT)};
+			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
+				return it->second->size();
+			}
 
-		if (auto it = dispatchers.find(key); it != dispatchers.end()) {
-			return it->second->size();
+			return 0;
 		}
-
-		return 0;
 	}
 
 private:
+	// Delegation targets for the move constructors, so that the source stays locked while members are initialized.
+	// The allocator can't be assigned in the constructor body (e.g. std::pmr::polymorphic_allocator isn't assignable).
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, lock_type /*lock*/) :
+		allocator(other.allocator),
+		dispatchers(std::move(other.dispatchers)) {
+	}
+
+	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, AllocatorT const& alloc, lock_type /*lock*/) :
+		allocator(alloc),
+		dispatchers(std::move(other.dispatchers), allocator) {
+	}
+
 	template<typename EventT>
 	auto get_or_create_dispatcher() -> detail::synchronized_discrete_event_dispatcher<std::remove_cvref_t<EventT>, AllocatorT>& {
 		using event_type = std::remove_cvref_t<EventT>;
@@ -400,7 +385,13 @@ private:
 		// Check if it actually was created since two threads could get to the point where they try
 		// to acquire an exclusive lock.
 		if (inserted) {
-			iter->second = std::allocate_shared<derived_dispatcher_type>(allocator, allocator);
+			try {
+				iter->second = std::allocate_shared<derived_dispatcher_type>(allocator, allocator);
+			}
+			catch (...) {
+				dispatchers.erase(iter);  // don't leave a null dispatcher behind
+				throw;
+			}
 		}
 
 		return static_cast<derived_dispatcher_type&>(*(iter->second));
@@ -417,4 +408,4 @@ using synchronized_event_dispatcher = basic_synchronized_event_dispatcher<>;
 
 }  //namespace events
 
-// NOLINTEND(cppcoreguidelines-prefer-member-initializer,hicpp-noexcept-move,performance-noexcept-move-constructor)
+// NOLINTEND(hicpp-noexcept-move,performance-noexcept-move-constructor)

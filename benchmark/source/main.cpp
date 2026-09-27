@@ -247,7 +247,7 @@ auto bench_synchronized_event_dispatcher(int num_events, int num_callbacks, int 
 
 	auto dispatcher = events::synchronized_event_dispatcher{};
 	auto sink = std::atomic_int{0};
-	auto const const conns = connect_event_types(dispatcher, num_types, num_callbacks, sink);
+	auto const conns = connect_event_types(dispatcher, num_types, num_callbacks, sink);
 
 	auto const events_per_thread = num_events / num_threads;
 

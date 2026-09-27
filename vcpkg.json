@@ -1,9 +1,7 @@
 {
   "name": "events",
   "version-semver": "0.1.0",
-  "dependencies": [
-	"plf-colony"
-  ],
+  "dependencies": [],
   "default-features": [],
   "features": {
     "test": {

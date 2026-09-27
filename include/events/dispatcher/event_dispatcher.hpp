@@ -1,10 +1,8 @@
 #pragma once
 
-#include <algorithm>
 #include <concepts>
 #include <map>
 #include <memory>
-#include <numeric>
 #include <ranges>
 #include <typeinfo>
 #include <typeindex>
@@ -26,16 +24,16 @@ class [[nodiscard]] discrete_event_dispatcher<void, AllocatorT> {
 public:
 	discrete_event_dispatcher() = default;
 	discrete_event_dispatcher(discrete_event_dispatcher const&) = delete;
-	discrete_event_dispatcher(discrete_event_dispatcher&&) noexcept = default;
+	discrete_event_dispatcher(discrete_event_dispatcher&&) = delete;
 
 	virtual ~discrete_event_dispatcher() = default;
 
 	auto operator=(discrete_event_dispatcher const&) -> discrete_event_dispatcher& = delete;
-	auto operator=(discrete_event_dispatcher&&) noexcept -> discrete_event_dispatcher& = default;
+	auto operator=(discrete_event_dispatcher&&) -> discrete_event_dispatcher& = delete;
 
 	virtual auto dispatch() -> void = 0;
 	virtual auto clear() -> void = 0;
-	virtual auto size() -> size_t = 0;
+	[[nodiscard]] virtual auto size() const -> size_t = 0;
 };
 
 
@@ -45,24 +43,8 @@ class [[nodiscard]] discrete_event_dispatcher final : public discrete_event_disp
 	using event_container_type = std::vector<EventT, event_allocator_type>;
 
 public:
-	discrete_event_dispatcher() = default;
-
 	explicit discrete_event_dispatcher(AllocatorT const& allocator) : handler(allocator), events(allocator) {
 	}
-
-	discrete_event_dispatcher(discrete_event_dispatcher const&) = delete;
-
-	discrete_event_dispatcher(discrete_event_dispatcher&&) noexcept = default;
-
-	discrete_event_dispatcher(discrete_event_dispatcher&& other, AllocatorT const& allocator) :
-		handler(std::move(other.handler), allocator),
-		events(std::move(other.events), allocator) {
-	}
-
-	~discrete_event_dispatcher() override = default;
-
-	auto operator=(discrete_event_dispatcher const&) -> discrete_event_dispatcher& = delete;
-	auto operator=(discrete_event_dispatcher&&) noexcept -> discrete_event_dispatcher& = default;
 
 	template<std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
@@ -83,8 +65,8 @@ public:
 		handler.publish(event);
 	}
 
-	template<std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto send(RangeT&& range) -> void {
 		for (auto&& event : range) {
 			handler.publish(event);
@@ -97,17 +79,20 @@ public:
 		events.emplace_back(std::forward<ArgsT>(args)...);
 	}
 
-	template<std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto enqueue(RangeT&& range) -> void {
-		events.insert(events.end(), std::ranges::begin(range), std::ranges::end(range));
+		// vector::insert(pos, first, last) requires a common range with C++17-style iterators, so append manually
+		for (auto&& event : range) {
+			events.emplace_back(std::forward<decltype(event)>(event));
+		}
 	}
 
 	auto clear() -> void override {
 		events.clear();
 	}
 
-	auto size() -> size_t override {
+	[[nodiscard]] auto size() const -> size_t override {
 		return events.size();
 	}
 
@@ -150,13 +135,7 @@ public:
 	 *
 	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
 	 */
-	basic_event_dispatcher(basic_event_dispatcher&& other) noexcept {
-		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
-			allocator = std::move(other.allocator);
-		}
-
-		dispatchers = std::move(other.dispatchers);
-	}
+	basic_event_dispatcher(basic_event_dispatcher&& other) noexcept = default;
 
 	/**
 	 * @brief Construct a new basic_event_dispatcher that will take ownership of another's signal handlers and enqueued
@@ -165,7 +144,7 @@ public:
 	 * @details Existing connection objects from the other event dispatcher are NOT invalidated, and will now refer to
 	 *          this event dispatcher.
 	 */
-	basic_event_dispatcher(basic_event_dispatcher&& other, AllocatorT const& alloc) noexcept :
+	basic_event_dispatcher(basic_event_dispatcher&& other, AllocatorT const& alloc) :
 		allocator(alloc),
 		dispatchers(std::move(other.dispatchers), allocator) {
 	}
@@ -175,12 +154,19 @@ public:
 	auto operator=(basic_event_dispatcher const&) -> basic_event_dispatcher& = delete;
 
 	/**
-	 * @brief Move a the signal handlers and enqueued events from an basic_event_dispatcher into this one
+	 * @brief Move the signal handlers and enqueued events from a basic_event_dispatcher into this one
 	 *
-	 * @details Existing connection objects from this event dispatcher are invalidated. Existing connection objects
+	 * @details Existing connection objects from this event dispatcher are disconnected. Existing connection objects
 	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
 	 */
 	auto operator=(basic_event_dispatcher&& other) noexcept -> basic_event_dispatcher& {
+		if (&other == this) {
+			return *this;
+		}
+
+		// Destroy the previous dispatchers last, since destroying callbacks may run code that uses this dispatcher
+		auto const previous = std::move(dispatchers);
+
 		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
 			allocator = std::move(other.allocator);
 		}
@@ -229,7 +215,7 @@ public:
 	 * @tparam EventT  The type of event to enqueue
 	 * @tparam ArgsT
 	 *
-	 * @param args The arguments requires to construct an instance of this event
+	 * @param args The arguments required to construct an instance of this event
 	 */
 	template<typename EventT, typename... ArgsT>
 	requires std::constructible_from<EventT, ArgsT...>
@@ -243,10 +229,10 @@ public:
 	 * @tparam EventT  The type of event to enqueue
 	 * @tparam RangeT
 	 *
-	 * @param args The range of events to enqueue
+	 * @param range The range of events to enqueue
 	 */
-	template<typename EventT, std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<typename EventT, std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto enqueue(RangeT&& range) -> void {
 		get_or_create_dispatcher<EventT>().enqueue(std::forward<RangeT>(range));
 	}
@@ -256,7 +242,7 @@ public:
 	 *
 	 * @tparam EventT  The type of event to send
 	 *
-	 * @param args  An instance of the event to send
+	 * @param event  An instance of the event to send
 	 */
 	template<typename EventT>
 	auto send(EventT&& event) -> void {
@@ -269,12 +255,13 @@ public:
 	 * @tparam EventT  The type of event to send
 	 * @tparam ArgsT
 	 *
-	 * @param args  The arguments requires to construct an instance of this event
+	 * @param args  The arguments required to construct an instance of this event
 	 */
 	template<typename EventT, typename... ArgsT>
 	requires std::constructible_from<EventT, ArgsT...>
 	auto send(ArgsT&&... args) -> void {
-		get_or_create_dispatcher<EventT>().send(EventT{std::forward<ArgsT>(args)...});
+		// Parentheses (not braces) to match the constructible_from constraint and enqueue()'s emplace_back
+		get_or_create_dispatcher<EventT>().send(EventT(std::forward<ArgsT>(args)...));
 	}
 
 	/**
@@ -283,10 +270,10 @@ public:
 	 * @tparam EventT  The type of event to send
 	 * @tparam RangeT
 	 *
-	 * @param args The range of events to send
+	 * @param range The range of events to send
 	 */
-	template<typename EventT, std::ranges::range RangeT>
-	requires std::convertible_to<std::ranges::range_value_t<RangeT>, EventT>
+	template<typename EventT, std::ranges::input_range RangeT>
+	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto send(RangeT&& range) -> void {
 		get_or_create_dispatcher<EventT>().send(std::forward<RangeT>(range));
 	}
@@ -310,17 +297,21 @@ public:
 	[[nodiscard]]
 	auto queue_size() const -> size_t {
 		if constexpr (std::same_as<void, EventT>) {
-			auto sizes = std::views::values(dispatchers) | std::views::transform([](auto const& ptr) { return ptr->size(); });
-			return std::accumulate(std::ranges::begin(sizes), std::ranges::end(sizes), 0ull);
+			auto total = size_t{0};
+			for (auto const& [type, dispatcher] : dispatchers) {
+				total += dispatcher->size();
+			}
+			return total;
 		}
+		else {
+			auto const key = std::type_index{typeid(std::remove_cvref_t<EventT>)};
 
-		auto const key = std::type_index{typeid(std::remove_cvref_t<EventT>)};
+			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
+				return it->second->size();
+			}
 
-		if (auto it = dispatchers.find(key); it != dispatchers.end()) {
-			return it->second->size();
+			return 0;
 		}
-
-		return 0;
 	}
 
 private:
@@ -332,7 +323,13 @@ private:
 		auto const [iter, inserted] = dispatchers.try_emplace(std::type_index{typeid(event_type)});
 
 		if (inserted) {
-			iter->second = std::allocate_shared<derived_type>(allocator, allocator);
+			try {
+				iter->second = std::allocate_shared<derived_type>(allocator, allocator);
+			}
+			catch (...) {
+				dispatchers.erase(iter);  // don't leave a null dispatcher behind
+				throw;
+			}
 		}
 
 		return static_cast<derived_type&>(*(iter->second));
