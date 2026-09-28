@@ -3,6 +3,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -90,6 +94,64 @@ TEST_CASE("event_dispatcher: send range", "[event_dispatcher]") {
 	auto events_vec = std::vector<test_event>{{10}, {20}, {30}};
 	dispatcher.send<test_event>(events_vec);
 	CHECK(total == 60);
+}
+
+
+struct int_convertible_event {
+	int_convertible_event(int v) : value(v) { //NOLINT(google-explicit-constructor,hicpp-explicit-conversions)
+	}
+	int value;
+};
+
+TEST_CASE("event_dispatcher: send and enqueue construct events the same way", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto sizes = std::vector<std::size_t>{};
+
+	auto conn = dispatcher.connect<std::vector<int>>([&](std::vector<int> const& v) { sizes.push_back(v.size()); });
+
+	// vector<int>(3u, 7) has three elements. Brace-initialization would pick the initializer_list constructor instead
+	// (and reject 3u as a narrowing conversion).
+	dispatcher.send<std::vector<int>>(3u, 7);
+	dispatcher.enqueue<std::vector<int>>(3u, 7);
+	dispatcher.dispatch();
+
+	CHECK(sizes == std::vector<std::size_t>{3, 3});
+}
+
+TEST_CASE("event_dispatcher: enqueue and send accept non-common ranges", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+	int total = 0;
+
+	auto conn = dispatcher.connect<test_event>([&](test_event const& e) {
+		total += e.value;
+	});
+
+	auto source = std::vector<test_event>{{1}, {2}, {3}, {100}};
+	auto small = source | std::views::take_while([](test_event const& e) { return e.value < 10; });
+
+	dispatcher.enqueue<test_event>(small);
+	dispatcher.dispatch();
+	CHECK(total == 6);
+
+	dispatcher.send<test_event>(small);
+	CHECK(total == 12);
+}
+
+TEST_CASE("event_dispatcher: range elements are converted to the event type", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+	int total = 0;
+
+	auto conn = dispatcher.connect<int_convertible_event>([&](int_convertible_event const& e) {
+		total += e.value;
+	});
+
+	auto values = std::vector<int>{1, 2, 3};
+	dispatcher.enqueue<int_convertible_event>(values);
+	dispatcher.dispatch();
+	CHECK(total == 6);
+
+	dispatcher.send<int_convertible_event>(std::views::iota(1, 4));
+	CHECK(total == 12);
 }
 
 
@@ -305,4 +367,52 @@ TEST_CASE("event_dispatcher: dispatch with no connected callbacks", "[event_disp
 TEST_CASE("event_dispatcher: send with no connected callbacks", "[event_dispatcher]") {
 	auto dispatcher = events::event_dispatcher{};
 	dispatcher.send(test_event{1}); // must not crash
+}
+
+
+// ---- Lifetime ----
+
+TEST_CASE("event_dispatcher: connection may outlive the dispatcher", "[event_dispatcher]") {
+	auto conn = events::connection{};
+	auto scoped = events::scoped_connection{};
+
+	{
+		auto dispatcher = events::event_dispatcher{};
+		conn = dispatcher.connect<test_event>([](test_event const&) {});
+		scoped = dispatcher.connect<test_event>([](test_event const&) {});
+		CHECK(conn.connected());
+	}
+
+	CHECK_FALSE(conn.connected());
+	CHECK_FALSE(scoped.connected());
+	conn.disconnect(); // no-op
+}
+
+namespace {
+struct run_on_destroy {
+	std::function<void()> action;
+
+	run_on_destroy() = default;
+	run_on_destroy(run_on_destroy const&) = delete;
+	run_on_destroy(run_on_destroy&&) = delete;
+	~run_on_destroy() {
+		action();
+	}
+	auto operator=(run_on_destroy const&) -> run_on_destroy& = delete;
+	auto operator=(run_on_destroy&&) -> run_on_destroy& = delete;
+};
+}  //namespace
+
+TEST_CASE("event_dispatcher: move assignment may destroy callbacks that use the dispatcher", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+
+	// Destroying this callback enqueues an event on the same dispatcher
+	auto guard = std::make_shared<run_on_destroy>();
+	guard->action = [&dispatcher] { dispatcher.enqueue(other_event{"from destructor"}); };
+	auto conn = dispatcher.connect<test_event>([guard](test_event const&) {});
+	guard.reset();
+
+	dispatcher = events::event_dispatcher{};
+	CHECK_FALSE(conn.connected());
+	CHECK(dispatcher.queue_size<other_event>() == 1);
 }

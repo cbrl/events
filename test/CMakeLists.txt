@@ -23,6 +23,7 @@ add_executable(events_test
     source/test_synchronized_signal_handler.cpp
     source/test_event_dispatcher.cpp
     source/test_synchronized_event_dispatcher.cpp
+    source/test_allocators.cpp
 )
 target_link_libraries(
     events_test PRIVATE

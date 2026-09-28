@@ -4,6 +4,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <vector>
@@ -115,6 +119,38 @@ TEST_CASE("synchronized_event_dispatcher: send range", "[synchronized_event_disp
 	auto events_vec = std::vector<sync_test_event>{{10}, {20}};
 	dispatcher.send<sync_test_event>(events_vec);
 	CHECK(total == 30);
+}
+
+TEST_CASE("synchronized_event_dispatcher: send and enqueue construct events the same way", "[synchronized_event_dispatcher]") {
+	auto dispatcher = events::synchronized_event_dispatcher{};
+	auto sizes = std::vector<std::size_t>{};
+
+	auto conn = dispatcher.connect<std::vector<int>>([&](std::vector<int> const& v) { sizes.push_back(v.size()); });
+
+	dispatcher.send<std::vector<int>>(3u, 7);
+	dispatcher.enqueue<std::vector<int>>(3u, 7);
+	dispatcher.dispatch();
+
+	CHECK(sizes == std::vector<std::size_t>{3, 3});
+}
+
+TEST_CASE("synchronized_event_dispatcher: enqueue and send accept non-common ranges", "[synchronized_event_dispatcher]") {
+	auto dispatcher = events::synchronized_event_dispatcher{};
+	int total = 0;
+
+	auto conn = dispatcher.connect<sync_test_event>([&](sync_test_event const& e) {
+		total += e.value;
+	});
+
+	auto source = std::vector<sync_test_event>{{1}, {2}, {3}, {100}};
+	auto small = source | std::views::take_while([](sync_test_event const& e) { return e.value < 10; });
+
+	dispatcher.enqueue<sync_test_event>(small);
+	dispatcher.dispatch();
+	CHECK(total == 6);
+
+	dispatcher.send<sync_test_event>(small);
+	CHECK(total == 12);
 }
 
 TEST_CASE("synchronized_event_dispatcher: disconnect", "[synchronized_event_dispatcher]") {
@@ -364,4 +400,52 @@ TEST_CASE("synchronized_event_dispatcher: dispatch with no enqueued events", "[s
 TEST_CASE("synchronized_event_dispatcher: send with no callbacks", "[synchronized_event_dispatcher]") {
 	auto dispatcher = events::synchronized_event_dispatcher{};
 	dispatcher.send(sync_test_event{1}); // must not crash
+}
+
+
+// ---- Lifetime ----
+
+TEST_CASE("synchronized_event_dispatcher: connection may outlive the dispatcher", "[synchronized_event_dispatcher]") {
+	auto conn = events::connection{};
+	auto scoped = events::scoped_connection{};
+
+	{
+		auto dispatcher = events::synchronized_event_dispatcher{};
+		conn = dispatcher.connect<sync_test_event>([](sync_test_event const&) {});
+		scoped = dispatcher.connect<sync_test_event>([](sync_test_event const&) {});
+		CHECK(conn.connected());
+	}
+
+	CHECK_FALSE(conn.connected());
+	CHECK_FALSE(scoped.connected());
+	conn.disconnect(); // no-op
+}
+
+namespace {
+struct run_on_destroy {
+	std::function<void()> action;
+
+	run_on_destroy() = default;
+	run_on_destroy(run_on_destroy const&) = delete;
+	run_on_destroy(run_on_destroy&&) = delete;
+	~run_on_destroy() {
+		action();
+	}
+	auto operator=(run_on_destroy const&) -> run_on_destroy& = delete;
+	auto operator=(run_on_destroy&&) -> run_on_destroy& = delete;
+};
+}  //namespace
+
+TEST_CASE("synchronized_event_dispatcher: move assignment may destroy callbacks that use the dispatcher", "[synchronized_event_dispatcher]") {
+	auto dispatcher = events::synchronized_event_dispatcher{};
+
+	// Destroying this callback enqueues an event on the same dispatcher
+	auto guard = std::make_shared<run_on_destroy>();
+	guard->action = [&dispatcher] { dispatcher.enqueue(sync_other_event{"from destructor"}); };
+	auto conn = dispatcher.connect<sync_test_event>([guard](sync_test_event const&) {});
+	guard.reset();
+
+	dispatcher = events::synchronized_event_dispatcher{};
+	CHECK_FALSE(conn.connected());
+	CHECK(dispatcher.queue_size<sync_other_event>() == 1);
 }
