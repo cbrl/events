@@ -127,33 +127,43 @@ TEST_CASE("synchronized_signal_handler: concurrent publish", "[synchronized_sign
 TEST_CASE("synchronized_signal_handler: concurrent connect and publish", "[synchronized_signal_handler][threaded]") {
 	auto sigh = events::synchronized_signal_handler<void()>{};
 	std::atomic<int> call_count{0};
+	std::atomic<int> connectors_running{0};
+	std::atomic<int> failures{0};
 
 	constexpr int num_threads = 4;
-	constexpr int ops_per_thread = 5'000;
+	constexpr int connects_per_thread = 500;
 
 	auto threads = std::vector<std::thread>{};
 	threads.reserve(num_threads * 2);
 
-	// Threads that connect
+	connectors_running.store(num_threads);
+
+	// Threads that connect, then disconnect everything they connected
 	for (int t = 0; t < num_threads; ++t) {
-		threads.emplace_back([&sigh, &call_count] {
-			std::vector<events::connection> conns;
-			for (int i = 0; i < ops_per_thread; ++i) {
+		threads.emplace_back([&] {
+			auto conns = std::vector<events::connection>{};
+			for (int i = 0; i < connects_per_thread; ++i) {
 				conns.push_back(sigh.connect([&call_count] {
 					call_count.fetch_add(1, std::memory_order_relaxed);
 				}));
+				if (!conns.back().connected()) {
+					failures.fetch_add(1, std::memory_order_relaxed);
+				}
 			}
-			// Keep connections alive until thread finishes
 			for (auto& c : conns) {
 				c.disconnect();
+				if (c.connected()) {
+					failures.fetch_add(1, std::memory_order_relaxed);
+				}
 			}
+			connectors_running.fetch_sub(1, std::memory_order_release);
 		});
 	}
 
-	// Threads that publish
+	// Threads that publish until the connecting threads are done
 	for (int t = 0; t < num_threads; ++t) {
-		threads.emplace_back([&sigh] {
-			for (int i = 0; i < ops_per_thread; ++i) {
+		threads.emplace_back([&] {
+			while (connectors_running.load(std::memory_order_acquire) > 0) {
 				sigh.publish();
 			}
 		});
@@ -163,7 +173,12 @@ TEST_CASE("synchronized_signal_handler: concurrent connect and publish", "[synch
 		t.join();
 	}
 
-	CHECK(true); // if we get here, no deadlock or crash
+	CHECK(failures.load() == 0);
+	CHECK(sigh.size() == 0);
+
+	auto const calls = call_count.load();
+	sigh.publish();
+	CHECK(call_count.load() == calls);
 }
 
 TEST_CASE("synchronized_signal_handler: concurrent connect and disconnect", "[synchronized_signal_handler][threaded]") {

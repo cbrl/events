@@ -155,6 +155,13 @@ TEST_CASE("event_dispatcher: allocator-extended move constructor uses the given 
 
 	dispatcher2.dispatch();
 	CHECK(received == 7);
+
+	// With unequal allocators the map elements are moved one by one. The source must not keep the moved-from entries.
+	CHECK(dispatcher1.queue_size() == 0); //NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved)
+	dispatcher1.enqueue(alloc_event{1});
+	CHECK(dispatcher1.queue_size() == 1);
+	dispatcher1.dispatch();
+	CHECK(received == 7);
 }
 
 TEST_CASE("synchronized_event_dispatcher: move constructor keeps the allocator", "[allocator][synchronized_event_dispatcher]") {
@@ -187,4 +194,54 @@ TEST_CASE("synchronized_event_dispatcher: allocator-extended move constructor us
 
 	dispatcher2.dispatch();
 	CHECK(received == 7);
+
+	// With unequal allocators the map elements are moved one by one. The source must not keep the moved-from entries.
+	CHECK(dispatcher1.queue_size() == 0); //NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved)
+	dispatcher1.enqueue(alloc_event{1});
+	CHECK(dispatcher1.queue_size() == 1);
+	dispatcher1.dispatch();
+	CHECK(received == 7);
+}
+
+template<typename DispatcherT>
+static auto check_dispatch_reuses_memory() -> void {
+	auto resource = counting_resource{};
+	auto dispatcher = DispatcherT{pmr_allocator{&resource}};
+	int total = 0;
+
+	auto conn = dispatcher.template connect<alloc_event>([&](alloc_event const& e) { total += e.value; });
+
+	auto const cycle = [&] {
+		for (int i = 0; i < 100; ++i) {
+			dispatcher.enqueue(alloc_event{1});
+		}
+		dispatcher.dispatch();
+	};
+
+	// The queue and the staging area swap buffers, so both need to grow first
+	cycle();
+	cycle();
+
+	constexpr auto cycles = std::size_t{10};
+	auto const allocations = resource.allocations;
+	for (auto i = std::size_t{0}; i < cycles; ++i) {
+		cycle();
+	}
+
+#if defined(_ITERATOR_DEBUG_LEVEL) && (_ITERATOR_DEBUG_LEVEL != 0)
+	// MSVC's debug iterators allocate a small bookkeeping object for each container that is constructed (here, the
+	// batch that dispatch() publishes from). Without buffer reuse, 100 events would take about 8 allocations per cycle.
+	CHECK(resource.allocations - allocations <= cycles);
+#else
+	CHECK(resource.allocations == allocations);
+#endif
+	CHECK(total == 1200);
+}
+
+TEST_CASE("event_dispatcher: dispatch reuses the queue's memory", "[allocator][event_dispatcher]") {
+	check_dispatch_reuses_memory<events::basic_event_dispatcher<pmr_allocator>>();
+}
+
+TEST_CASE("synchronized_event_dispatcher: dispatch reuses the queue's memory", "[allocator][synchronized_event_dispatcher]") {
+	check_dispatch_reuses_memory<events::basic_synchronized_event_dispatcher<pmr_allocator>>();
 }

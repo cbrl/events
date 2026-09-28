@@ -2,6 +2,7 @@
 #include <events/connection.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <cstddef>
 #include <memory>
@@ -397,7 +398,7 @@ TEST_CASE("signal_handler: works with complex argument types", "[signal_handler]
 	CHECK(captured.id == 42);
 	CHECK(captured.data == "test");
 	REQUIRE(captured.values.size() == 3);
-	CHECK(captured.values[0] == 1.0);
+	CHECK_THAT(captured.values[0], Catch::Matchers::WithinULP(1.0, 0));
 }
 
 TEST_CASE("signal_handler: works with multiple argument types", "[signal_handler]") {
@@ -415,7 +416,7 @@ TEST_CASE("signal_handler: works with multiple argument types", "[signal_handler
 
 	sigh.publish(1, 2.5, std::string("hello"));
 	CHECK(ci == 1);
-	CHECK(cd == 2.5);
+	CHECK_THAT(cd, Catch::Matchers::WithinULP(2.5, 0));
 	CHECK(cs == "hello");
 }
 
