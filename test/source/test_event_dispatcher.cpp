@@ -3,10 +3,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -268,8 +270,54 @@ TEST_CASE("event_dispatcher: move preserves connections and queue", "[event_disp
 	dispatcher1.enqueue(test_event{99});
 
 	auto dispatcher2 = std::move(dispatcher1);
+	CHECK(dispatcher1.queue_size() == 0); //NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved)
+	CHECK(dispatcher2.queue_size() == 1);
+
 	dispatcher2.dispatch();
 	CHECK(received == 99);
+	CHECK(conn.connected());
+}
+
+TEST_CASE("event_dispatcher: a moved-from dispatcher is empty and can be reused", "[event_dispatcher]") {
+	auto dispatcher1 = events::event_dispatcher{};
+	int received1 = 0;
+	int received2 = 0;
+
+	auto conn1 = dispatcher1.connect<test_event>([&](test_event const& e) { received1 += e.value; });
+	dispatcher1.enqueue(test_event{1});
+
+	auto dispatcher2 = events::event_dispatcher{};
+	dispatcher2 = std::move(dispatcher1);
+
+	// dispatcher1 no longer shares anything with dispatcher2
+	auto conn2 = dispatcher1.connect<test_event>([&](test_event const& e) { received2 += e.value; }); //NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved)
+	dispatcher1.enqueue(test_event{10});
+	CHECK(dispatcher1.queue_size() == 1);
+	CHECK(dispatcher2.queue_size() == 1);
+
+	dispatcher1.dispatch();
+	CHECK(received1 == 0);
+	CHECK(received2 == 10);
+
+	dispatcher2.dispatch();
+	CHECK(received1 == 1);
+	CHECK(received2 == 10);
+}
+
+TEST_CASE("event_dispatcher: move assignment disconnects the previous callbacks and discards their events", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+	int received = 0;
+
+	auto conn = dispatcher.connect<test_event>([&](test_event const&) { ++received; });
+	dispatcher.enqueue(test_event{1});
+
+	dispatcher = events::event_dispatcher{};
+	CHECK_FALSE(conn.connected());
+	CHECK(dispatcher.queue_size() == 0);
+
+	dispatcher.enqueue(test_event{1});
+	dispatcher.dispatch();
+	CHECK(received == 0);
 }
 
 
@@ -355,18 +403,21 @@ TEST_CASE("event_dispatcher: connect new event type during dispatch", "[event_di
 TEST_CASE("event_dispatcher: dispatch with no enqueued events is safe", "[event_dispatcher]") {
 	auto dispatcher = events::event_dispatcher{};
 	auto conn = dispatcher.connect<test_event>([](test_event const&) {});
-	dispatcher.dispatch(); // must not crash
+	dispatcher.dispatch();
+	CHECK(dispatcher.queue_size() == 0);
 }
 
 TEST_CASE("event_dispatcher: dispatch with no connected callbacks", "[event_dispatcher]") {
 	auto dispatcher = events::event_dispatcher{};
 	dispatcher.enqueue(test_event{1});
-	dispatcher.dispatch(); // must not crash
+	dispatcher.dispatch();
+	CHECK(dispatcher.queue_size() == 0);
 }
 
 TEST_CASE("event_dispatcher: send with no connected callbacks", "[event_dispatcher]") {
 	auto dispatcher = events::event_dispatcher{};
-	dispatcher.send(test_event{1}); // must not crash
+	dispatcher.send(test_event{1});
+	CHECK(dispatcher.queue_size() == 0);
 }
 
 
@@ -415,4 +466,267 @@ TEST_CASE("event_dispatcher: move assignment may destroy callbacks that use the 
 	dispatcher = events::event_dispatcher{};
 	CHECK_FALSE(conn.connected());
 	CHECK(dispatcher.queue_size<other_event>() == 1);
+}
+
+
+// ---- Delivery order ----
+
+namespace {
+struct first_event {};
+struct second_event {};
+struct third_event {};
+}  //namespace
+
+TEST_CASE("event_dispatcher: event types are dispatched in the order they were first used", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto order = std::string{};
+
+	dispatcher.send(third_event{});  // first use of third_event, with no callbacks yet
+	auto c1 = dispatcher.connect<first_event>([&](first_event const&) { order += '1'; });
+	dispatcher.enqueue(second_event{});
+	auto c2 = dispatcher.connect<second_event>([&](second_event const&) { order += '2'; });
+	auto c3 = dispatcher.connect<third_event>([&](third_event const&) { order += '3'; });
+
+	dispatcher.enqueue(first_event{});
+	dispatcher.enqueue(third_event{});
+	dispatcher.dispatch();
+
+	CHECK(order == "312");
+}
+
+TEST_CASE("event_dispatcher: events of any type enqueued during dispatch are delivered by the next dispatch", "[event_dispatcher][reentrancy]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto log = std::vector<std::string>{};
+
+	// Both processing orders. Before, whether the new event was delivered right away depended on the order of the types.
+	SECTION("test_event first") {
+		dispatcher.enqueue(test_event{0});
+		dispatcher.enqueue(other_event{"a"});
+	}
+	SECTION("other_event first") {
+		dispatcher.enqueue(other_event{"a"});
+		dispatcher.enqueue(test_event{0});
+	}
+
+	// Each callback enqueues an event of the other type
+	auto c1 = dispatcher.connect<test_event>([&](test_event const& e) {
+		log.push_back("test " + std::to_string(e.value));
+		if (e.value == 0) {
+			dispatcher.enqueue(other_event{"b"});
+		}
+	});
+	auto c2 = dispatcher.connect<other_event>([&](other_event const& e) {
+		log.push_back("other " + e.message);
+		if (e.message == "a") {
+			dispatcher.enqueue(test_event{1});
+		}
+	});
+
+	dispatcher.dispatch();
+	CHECK(log.size() == 2);
+	CHECK(dispatcher.queue_size() == 2);
+
+	dispatcher.dispatch();
+	CHECK(log.size() == 4);
+	CHECK(dispatcher.queue_size() == 0);
+
+	std::ranges::sort(log);
+	CHECK(log == std::vector<std::string>{"other a", "other b", "test 0", "test 1"});
+}
+
+
+// ---- Exceptions ----
+
+TEST_CASE("event_dispatcher: events are not lost when a callback throws", "[event_dispatcher][exceptions]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto received = std::vector<int>{};
+	int other_count = 0;
+
+	auto c1 = dispatcher.connect<test_event>([&](test_event const& e) {
+		if (e.value == 2) {
+			dispatcher.enqueue(test_event{10});  // enqueued during the failed dispatch
+			throw std::runtime_error{"callback failed"};
+		}
+		received.push_back(e.value);
+	});
+	auto c2 = dispatcher.connect<other_event>([&](other_event const&) { ++other_count; });
+
+	dispatcher.enqueue(test_event{1});
+	dispatcher.enqueue(test_event{2});
+	dispatcher.enqueue(test_event{3});
+	dispatcher.enqueue(test_event{4});
+	dispatcher.enqueue(other_event{"x"});
+
+	CHECK_THROWS_AS(dispatcher.dispatch(), std::runtime_error);
+	CHECK(received == std::vector<int>{1});
+	CHECK(other_count == 0);
+
+	// The event whose callback threw is discarded. The undelivered events stay queued, in front of newer ones.
+	CHECK(dispatcher.queue_size<test_event>() == 3);
+	CHECK(dispatcher.queue_size<other_event>() == 1);
+	dispatcher.enqueue(test_event{5});
+
+	dispatcher.dispatch();
+	CHECK(received == std::vector<int>{1, 3, 4, 10, 5});
+	CHECK(other_count == 1);
+	CHECK(dispatcher.queue_size() == 0);
+}
+
+TEST_CASE("event_dispatcher: callbacks after one that throws are not invoked for that event", "[event_dispatcher][exceptions]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto log = std::string{};
+	bool fail = true;
+
+	auto c1 = dispatcher.connect<test_event>([&](test_event const& e) {
+		log += (e.value == 0) ? "a0 " : "a1 ";
+		if (fail) {
+			fail = false;
+			throw std::runtime_error{"callback failed"};
+		}
+	});
+	auto c2 = dispatcher.connect<test_event>([&](test_event const& e) { log += (e.value == 0) ? "b0 " : "b1 "; });
+
+	dispatcher.enqueue(test_event{0});
+	dispatcher.enqueue(test_event{1});
+
+	CHECK_THROWS_AS(dispatcher.dispatch(), std::runtime_error);
+	CHECK(log == "a0 ");
+
+	dispatcher.dispatch();
+	CHECK(log == "a0 a1 b1 ");
+}
+
+
+// ---- Clearing ----
+
+TEST_CASE("event_dispatcher: clear", "[event_dispatcher]") {
+	auto dispatcher = events::event_dispatcher{};
+	int count = 0;
+	auto conn = dispatcher.connect<test_event>([&](test_event const&) { ++count; });
+
+	dispatcher.clear<test_event>();   // nothing to clear
+	dispatcher.clear<third_event>();  // unknown type
+
+	dispatcher.enqueue(test_event{1});
+	dispatcher.enqueue(test_event{2});
+	dispatcher.enqueue(other_event{"x"});
+
+	dispatcher.clear<test_event>();
+	CHECK(dispatcher.queue_size<test_event>() == 0);
+	CHECK(dispatcher.queue_size<other_event>() == 1);
+
+	dispatcher.enqueue(test_event{3});
+	dispatcher.clear();
+	CHECK(dispatcher.queue_size() == 0);
+
+	dispatcher.dispatch();
+	CHECK(count == 0);
+	CHECK(conn.connected());
+}
+
+TEST_CASE("event_dispatcher: clear during dispatch discards the undelivered events", "[event_dispatcher][reentrancy]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto received = std::vector<int>{};
+	int other_count = 0;
+
+	auto c1 = dispatcher.connect<test_event>([&](test_event const& e) {
+		received.push_back(e.value);
+		if (e.value == 2) {
+			dispatcher.clear();
+		}
+	});
+	auto c2 = dispatcher.connect<other_event>([&](other_event const&) { ++other_count; });
+
+	dispatcher.enqueue(test_event{1});
+	dispatcher.enqueue(test_event{2});
+	dispatcher.enqueue(test_event{3});
+	dispatcher.enqueue(other_event{"x"});
+	dispatcher.dispatch();
+
+	CHECK(received == std::vector<int>{1, 2});
+	CHECK(other_count == 0);
+	CHECK(dispatcher.queue_size() == 0);
+}
+
+
+// ---- More reentrancy ----
+
+TEST_CASE("event_dispatcher: nested dispatch delivers each event once", "[event_dispatcher][reentrancy]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto received = std::vector<int>{};
+	auto other_received = std::vector<std::string>{};
+
+	auto c1 = dispatcher.connect<test_event>([&](test_event const& e) {
+		received.push_back(e.value);
+		if (e.value == 1) {
+			dispatcher.dispatch();  // delivers other_event{"a"}, which the outer dispatch hasn't reached yet
+		}
+	});
+	auto c2 = dispatcher.connect<other_event>([&](other_event const& e) { other_received.push_back(e.message); });
+
+	dispatcher.enqueue(test_event{1});
+	dispatcher.enqueue(test_event{2});
+	dispatcher.enqueue(other_event{"a"});
+	dispatcher.dispatch();
+
+	CHECK(received == std::vector<int>{1, 2});
+	CHECK(other_received == std::vector<std::string>{"a"});
+	CHECK(dispatcher.queue_size() == 0);
+}
+
+TEST_CASE("event_dispatcher: destroying the dispatcher during dispatch", "[event_dispatcher][reentrancy]") {
+	auto dispatcher = std::make_unique<events::event_dispatcher>();
+	auto* const raw = dispatcher.get();
+	auto received = std::vector<int>{};
+	int other_count = 0;
+
+	auto c1 = dispatcher->connect<test_event>([&](test_event const& e) {
+		received.push_back(e.value);
+		dispatcher.reset();
+	});
+	auto c2 = dispatcher->connect<other_event>([&](other_event const&) { ++other_count; });
+
+	dispatcher->enqueue(test_event{1});
+	dispatcher->enqueue(test_event{2});
+	dispatcher->enqueue(other_event{"x"});
+	raw->dispatch();
+
+	CHECK(received == std::vector<int>{1});
+	CHECK(other_count == 0);
+	CHECK_FALSE(c1.connected());
+	CHECK_FALSE(c2.connected());
+}
+
+TEST_CASE("event_dispatcher: assigning to the dispatcher during dispatch", "[event_dispatcher][reentrancy]") {
+	auto dispatcher = events::event_dispatcher{};
+	auto received = std::vector<int>{};
+
+	auto conn = dispatcher.connect<test_event>([&](test_event const& e) {
+		received.push_back(e.value);
+		dispatcher = events::event_dispatcher{};
+		dispatcher.enqueue(test_event{100});  // goes to the new, empty state
+	});
+
+	dispatcher.enqueue(test_event{1});
+	dispatcher.enqueue(test_event{2});
+	dispatcher.dispatch();
+
+	CHECK(received == std::vector<int>{1});
+	CHECK_FALSE(conn.connected());
+	CHECK(dispatcher.queue_size() == 1);
+}
+
+TEST_CASE("event_dispatcher: destroying the dispatcher while sending a range", "[event_dispatcher][reentrancy]") {
+	auto dispatcher = std::make_unique<events::event_dispatcher>();
+	auto* const raw = dispatcher.get();
+	int count = 0;
+
+	auto conn = dispatcher->connect<test_event>([&](test_event const&) {
+		++count;
+		dispatcher.reset();
+	});
+
+	auto const events_vec = std::vector<test_event>{{1}, {2}, {3}};
+	raw->send<test_event>(events_vec);
+	CHECK(count == 1);
 }

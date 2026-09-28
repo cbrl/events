@@ -1,6 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <concepts>
+#include <cstddef>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -9,6 +12,7 @@
 #include <shared_mutex>
 #include <typeinfo>
 #include <typeindex>
+#include <utility>
 #include <vector>
 
 #include <events/connection.hpp>
@@ -36,8 +40,19 @@ public:
 	auto operator=(synchronized_discrete_event_dispatcher const&) -> synchronized_discrete_event_dispatcher& = delete;
 	auto operator=(synchronized_discrete_event_dispatcher&&) -> synchronized_discrete_event_dispatcher& = delete;
 
-	virtual auto dispatch() -> void = 0;
+	/// Move the queued events to the staging area. They're published by the next call to dispatch_staged().
+	virtual auto stage() -> void = 0;
+
+	/// Publish the staged events
+	virtual auto dispatch_staged() -> void = 0;
+
+	/// Discard the queued and staged events, and stop a dispatch_staged() that is in progress
 	virtual auto clear() -> void = 0;
+
+	/// Disconnect all callbacks, discard all events, and stop a dispatch_staged() that is in progress
+	virtual auto close() noexcept -> void = 0;
+
+	/// Get the number of events that haven't been published yet
 	[[nodiscard]] virtual auto size() const -> size_t = 0;
 };
 
@@ -46,9 +61,13 @@ template<typename EventT, typename AllocatorT>
 class [[nodiscard]] synchronized_discrete_event_dispatcher final : public synchronized_discrete_event_dispatcher<void, AllocatorT> {
 	using event_allocator_type = typename std::allocator_traits<AllocatorT>::template rebind_alloc<EventT>;
 	using event_container_type = std::vector<EventT, event_allocator_type>;
+	using difference_type = typename event_container_type::difference_type;
 
 public:
-	explicit synchronized_discrete_event_dispatcher(AllocatorT const& alloc) : handler(alloc), events(alloc) {
+	explicit synchronized_discrete_event_dispatcher(AllocatorT const& alloc) :
+		handler(alloc),
+		events(alloc),
+		staged(alloc) {
 	}
 
 	template<std::invocable<EventT const&> FunctionT>
@@ -56,15 +75,55 @@ public:
 		return handler.connect(std::forward<FunctionT>(callback));
 	}
 
-	auto dispatch() -> void override {
-		// Moving the vector and iterating over a local one allows events to be enqueued during iteration
+	auto stage() -> void override {
+		auto lock = std::scoped_lock{events_mut};
+
+		if (staged.empty()) {
+			// The queue takes over the staging buffer, so its capacity is reused instead of reallocated
+			staged.swap(events);
+		}
+		else {
+			// Left over from an interrupted, nested or concurrent dispatch. Those events are older, so they stay in front.
+			staged.insert(staged.end(), std::make_move_iterator(events.begin()), std::make_move_iterator(events.end()));
+			events.clear();
+		}
+	}
+
+	auto dispatch_staged() -> void override {
+		// Publish from a local batch without holding the lock, so that callbacks may enqueue events or dispatch again
 		auto lock = std::unique_lock{events_mut};
-		auto to_publish = std::move(events);
-		events.clear();
+		if (staged.empty()) {
+			return;
+		}
+
+		auto batch = std::move(staged);
+		staged.clear();
+		auto const current_generation = generation.load(std::memory_order_relaxed);
 		lock.unlock();
 
-		for (auto const& event : to_publish) {
-			handler.publish(event);
+		auto const* const first = batch.data();  // callbacks can't reach the local batch, so it doesn't change
+		auto const count = batch.size();
+		auto index = size_t{0};
+
+		try {
+			for (; (index < count) && (generation.load(std::memory_order_relaxed) == current_generation); ++index) {
+				handler.publish(first[index]);
+			}
+		}
+		catch (...) {
+			lock.lock();
+			if (generation.load(std::memory_order_relaxed) == current_generation) {
+				requeue(batch, index + 1);  // The event whose callback threw isn't delivered again
+			}
+			lock.unlock();
+			throw;  // The rest of the batch (if any) is destroyed outside the lock
+		}
+
+		// Hand the buffer back so that its capacity is reused by the next stage()
+		batch.clear();
+		lock.lock();
+		if (staged.empty() && (staged.capacity() < batch.capacity())) {
+			staged.swap(batch);
 		}
 	}
 
@@ -98,20 +157,52 @@ public:
 	}
 
 	auto clear() -> void override {
-		auto lock = std::scoped_lock{events_mut};
-		events.clear();
+		discard_events();
+	}
+
+	auto close() noexcept -> void override {
+		handler.disconnect_all();
+		discard_events();
 	}
 
 	[[nodiscard]] auto size() const -> size_t override {
 		auto lock = std::scoped_lock{events_mut};
-		return events.size();
+		return events.size() + staged.size();
 	}
 
 private:
+	// Put the undelivered part of a batch back in front of anything staged since, so that the next dispatch delivers
+	// it. Requires events_mut to be locked.
+	auto requeue(event_container_type& batch, size_t first) noexcept -> void {
+		try {
+			batch.erase(batch.begin(), batch.begin() + static_cast<difference_type>(first));
+			batch.insert(batch.end(), std::make_move_iterator(staged.begin()), std::make_move_iterator(staged.end()));
+			staged.swap(batch);
+		}
+		catch (...) {
+			// Out of memory. The undelivered events are lost, but the callback's exception is still propagated.
+		}
+	}
+
+	auto discard_events() noexcept -> void {
+		// The events are destroyed after unlocking, in case an event's destructor enqueues an event
+		auto discarded_events = event_container_type{events.get_allocator()};
+		auto discarded_staged = event_container_type{staged.get_allocator()};
+
+		auto lock = std::scoped_lock{events_mut};
+		generation.fetch_add(1, std::memory_order_relaxed);
+		discarded_events.swap(events);
+		discarded_staged.swap(staged);
+	}
+
 	synchronized_signal_handler<void(EventT const&), AllocatorT> handler;
 
-	event_container_type events;
+	event_container_type events;  ///< Enqueued events
+	event_container_type staged;  ///< Events taken from the queue by a dispatch, and not published yet
 	mutable std::mutex events_mut;
+
+	/// Incremented (while holding events_mut) by clear() and close() to stop a dispatch_staged() in progress
+	std::atomic<size_t> generation{0};
 };
 
 }  //namespace detail
@@ -119,6 +210,17 @@ private:
 
 /**
  * @brief A thread-safe @ref event_dispatcher
+ *
+ * @details Events are delivered in the same order as by @ref event_dispatcher, with these additions for concurrent use:
+ *          - Events of one type are delivered in the order in which they were added to the queue.
+ *          - An event that another thread enqueues while dispatch() is starting may be delivered either by that
+ *            dispatch() or by the next one. Events enqueued after a dispatch() has started invoking callbacks are
+ *            delivered by the next one.
+ *          - If multiple threads call dispatch() at the same time, each event is delivered once, by one of them.
+ *            dispatch() may then return before all of the events it picked up were delivered by the other threads.
+ *          - Callbacks follow the rules of @ref synchronized_signal_handler. In particular, disconnecting doesn't wait
+ *            for invocations that are already running on other threads.
+ *          - Callbacks are never invoked while the dispatcher holds a lock, so they may use the dispatcher freely.
  */
 template<typename AllocatorT = std::allocator<void>>
 class [[nodiscard]] basic_synchronized_event_dispatcher {
@@ -127,9 +229,18 @@ class [[nodiscard]] basic_synchronized_event_dispatcher {
 	using generic_dispatcher = detail::synchronized_discrete_event_dispatcher<void, AllocatorT>;
 	using generic_dispatcher_pointer = std::shared_ptr<generic_dispatcher>;
 
+	template<typename EventT>
+	using derived_dispatcher = detail::synchronized_discrete_event_dispatcher<std::remove_cvref_t<EventT>, AllocatorT>;
+
 	using dispatcher_map_element_type = std::pair<const std::type_index, generic_dispatcher_pointer>;
 	using dispatcher_allocator_type = typename alloc_traits::template rebind_alloc<dispatcher_map_element_type>;
 	using dispatcher_map_type = std::map<std::type_index, generic_dispatcher_pointer, std::less<>, dispatcher_allocator_type>;
+
+	// The dispatchers in the order they were created. The list is replaced (never modified) when a dispatcher is added,
+	// so that dispatch() can use it without holding a lock.
+	using dispatcher_list_allocator_type = typename alloc_traits::template rebind_alloc<generic_dispatcher_pointer>;
+	using dispatcher_list_type = std::vector<generic_dispatcher_pointer, dispatcher_list_allocator_type>;
+	using dispatcher_list_pointer = std::shared_ptr<dispatcher_list_type const>;
 
 	using lock_type = std::unique_lock<std::shared_mutex>;
 
@@ -147,7 +258,8 @@ public:
 	 * @brief Construct a new synchronized_event_dispatcher that will take ownership of another's signal handlers and
 	 *        enqueued events.
 	 *
-	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
+	 * @details Existing connection objects from the other event dispatcher are NOT disconnected, and will now refer to
+	 *          this event dispatcher. The other event dispatcher is left empty.
 	 */
 	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other) :
 		basic_synchronized_event_dispatcher(std::move(other), lock_type{other.dispatcher_mut}) {
@@ -157,39 +269,52 @@ public:
 	 * @brief Construct a new basic_synchronized_event_dispatcher that will take ownership of another's signal handlers and
 	 *        enqueued events.
 	 *
-	 * @details Existing connection objects from the other event dispatcher are NOT invalidated.
+	 * @details Existing connection objects from the other event dispatcher are NOT disconnected, and will now refer to
+	 *          this event dispatcher. The other event dispatcher is left empty.
 	 */
 	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, AllocatorT const& alloc) :
 		basic_synchronized_event_dispatcher(std::move(other), alloc, lock_type{other.dispatcher_mut}) {
 	}
 
-	~basic_synchronized_event_dispatcher() = default;
+	~basic_synchronized_event_dispatcher() {
+		close_all(dispatcher_list);
+	}
 
 	auto operator=(basic_synchronized_event_dispatcher const&) -> basic_synchronized_event_dispatcher& = delete;
 
 	/**
 	 * @brief Move the signal handlers and enqueued events from a basic_synchronized_event_dispatcher into this one
 	 *
-	 * @details Existing connection objects from this event dispatcher are disconnected. Existing connection objects
-	 *          from the other event dispatcher are NOT invalidated, and will now refer to this event dispatcher.
+	 * @details Existing connection objects from this event dispatcher are disconnected, and its enqueued events are
+	 *          discarded. Existing connection objects from the other event dispatcher are NOT disconnected, and will now
+	 *          refer to this event dispatcher. The other event dispatcher is left empty.
 	 */
 	auto operator=(basic_synchronized_event_dispatcher&& other) -> basic_synchronized_event_dispatcher& {
 		if (&other == this) {
 			return *this;
 		}
 
-		// Destroyed after the locks are released, since destroying callbacks may run code that uses this dispatcher
-		auto previous = std::optional<dispatcher_map_type>{};
+		// Closed and destroyed after the locks are released, since destroying callbacks may run code that uses this
+		// dispatcher
+		auto previous_map = std::optional<dispatcher_map_type>{};
+		auto previous_list = dispatcher_list_pointer{};
 
-		auto locks = std::scoped_lock{dispatcher_mut, other.dispatcher_mut};
+		{
+			auto locks = std::scoped_lock{dispatcher_mut, other.dispatcher_mut};
 
-		previous.emplace(std::move(dispatchers));
+			previous_map.emplace(std::move(dispatchers));
+			previous_list = std::move(dispatcher_list);
 
-		if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
-			allocator = std::move(other.allocator);
+			if constexpr (alloc_traits::propagate_on_container_move_assignment::value) {
+				allocator = std::move(other.allocator);
+			}
+
+			dispatchers = std::move(other.dispatchers);
+			dispatcher_list = std::move(other.dispatcher_list);
+			other.dispatchers.clear();
 		}
 
-		dispatchers = std::move(other.dispatchers);
+		close_all(previous_list);
 
 		return *this;
 	}
@@ -211,7 +336,7 @@ public:
 	 */
 	template<typename EventT, std::invocable<EventT const&> FunctionT>
 	auto connect(FunctionT&& callback) -> connection {
-		return get_or_create_dispatcher<EventT>().connect(std::forward<FunctionT>(callback));
+		return get_dispatcher<EventT>()->connect(std::forward<FunctionT>(callback));
 	}
 
 
@@ -224,8 +349,7 @@ public:
 	 */
 	template<typename EventT>
 	auto enqueue(EventT&& event) -> void {
-		using event_type = std::remove_cvref_t<EventT>;
-		get_or_create_dispatcher<event_type>().enqueue(std::forward<EventT>(event));
+		get_dispatcher<EventT>()->enqueue(std::forward<EventT>(event));
 	}
 
 	/**
@@ -239,7 +363,7 @@ public:
 	template<typename EventT, typename... ArgsT>
 	requires std::constructible_from<EventT, ArgsT...>
 	auto enqueue(ArgsT&&... args) -> void {
-		get_or_create_dispatcher<EventT>().enqueue(std::forward<ArgsT>(args)...);
+		get_dispatcher<EventT>()->enqueue(std::forward<ArgsT>(args)...);
 	}
 
 	/**
@@ -253,7 +377,7 @@ public:
 	template<typename EventT, std::ranges::input_range RangeT>
 	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto enqueue(RangeT&& range) -> void {
-		get_or_create_dispatcher<EventT>().enqueue(std::forward<RangeT>(range));
+		get_dispatcher<EventT>()->enqueue(std::forward<RangeT>(range));
 	}
 
 	/**
@@ -265,7 +389,7 @@ public:
 	 */
 	template<typename EventT>
 	auto send(EventT&& event) -> void {
-		get_or_create_dispatcher<EventT>().send(std::forward<EventT>(event));
+		get_dispatcher<EventT>()->send(std::forward<EventT>(event));
 	}
 
 	/**
@@ -279,7 +403,7 @@ public:
 	template<typename EventT, typename... ArgsT>
 	requires std::constructible_from<EventT, ArgsT...>
 	auto send(ArgsT&&... args) -> void {
-		get_or_create_dispatcher<EventT>().send(EventT(std::forward<ArgsT>(args)...));
+		get_dispatcher<EventT>()->send(EventT(std::forward<ArgsT>(args)...));
 	}
 
 	/**
@@ -293,27 +417,49 @@ public:
 	template<typename EventT, std::ranges::input_range RangeT>
 	requires std::convertible_to<std::ranges::range_reference_t<RangeT>, EventT>
 	auto send(RangeT&& range) -> void {
-		get_or_create_dispatcher<EventT>().send(std::forward<RangeT>(range));
+		get_dispatcher<EventT>()->send(std::forward<RangeT>(range));
 	}
 
-	/// Dispatch all events in the queue
+	/**
+	 * @brief Dispatch all events in the queue
+	 *
+	 * @details See the class description for the order in which events are delivered.
+	 */
 	auto dispatch() -> void {
-		// Take a snapshot of the current dispatchers to avoid holding dispatcher_mut while invoking user callbacks. A
-		// callback may enqueue/send a new event type, which requires upgrading to an exclusive lock to create a new
-		// dispatcher. Holding a shared lock here would deadlock (publisher thread waits for callback; callback waits
-		// for unique_lock).
-		using snapshot_alloc_type = typename alloc_traits::template rebind_alloc<generic_dispatcher_pointer>;
-		auto snapshot = std::vector<generic_dispatcher_pointer, snapshot_alloc_type>{snapshot_alloc_type{allocator}};
-		{
-			auto lock = std::shared_lock{dispatcher_mut};
-			snapshot.reserve(dispatchers.size());
-			for (auto const& [type, dispatcher] : dispatchers) {
-				snapshot.push_back(dispatcher);
-			}
+		// No lock is held while invoking callbacks, since a callback may use this dispatcher (e.g. enqueue an event of
+		// a new type, which requires an exclusive lock). The list keeps its dispatchers alive.
+		auto const list = acquire_list();
+		if (!list) {
+			return;
 		}
 
-		for (auto const& dispatcher : snapshot) {
-			dispatcher->dispatch();
+		for (auto const& dispatcher : *list) {
+			dispatcher->stage();
+		}
+
+		for (auto const& dispatcher : *list) {
+			dispatcher->dispatch_staged();
+		}
+	}
+
+	/**
+	 * @brief Discard the enqueued events of a specific event type or of all event types
+	 *
+	 * @details Events that a dispatch() in progress hasn't delivered yet are discarded too.
+	 *
+	 * @tparam EventT  The type of event to discard. Leave default (void) to discard all enqueued events.
+	 */
+	template<typename EventT = void>
+	auto clear() -> void {
+		if constexpr (std::same_as<void, EventT>) {
+			if (auto const list = acquire_list()) {
+				for (auto const& dispatcher : *list) {
+					dispatcher->clear();
+				}
+			}
+		}
+		else if (auto const dispatcher = find_dispatcher<EventT>()) {
+			dispatcher->clear();
 		}
 	}
 
@@ -328,22 +474,19 @@ public:
 	template<typename EventT = void>
 	[[nodiscard]]
 	auto queue_size() const -> size_t {
-		auto lock = std::shared_lock{dispatcher_mut};
-
 		if constexpr (std::same_as<void, EventT>) {
 			auto total = size_t{0};
-			for (auto const& [type, dispatcher] : dispatchers) {
-				total += dispatcher->size();
+			if (auto const list = acquire_list()) {
+				for (auto const& dispatcher : *list) {
+					total += dispatcher->size();
+				}
 			}
 			return total;
 		}
+		else if (auto const dispatcher = find_dispatcher<EventT>()) {
+			return dispatcher->size();
+		}
 		else {
-			auto const key = std::type_index{typeid(std::remove_cvref_t<EventT>)};
-
-			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
-				return it->second->size();
-			}
-
 			return 0;
 		}
 	}
@@ -353,40 +496,61 @@ private:
 	// The allocator can't be assigned in the constructor body (e.g. std::pmr::polymorphic_allocator isn't assignable).
 	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, lock_type /*lock*/) :
 		allocator(other.allocator),
-		dispatchers(std::move(other.dispatchers)) {
+		dispatchers(std::move(other.dispatchers)),
+		dispatcher_list(std::move(other.dispatcher_list)) {
+		other.dispatchers.clear();
 	}
 
 	basic_synchronized_event_dispatcher(basic_synchronized_event_dispatcher&& other, AllocatorT const& alloc, lock_type /*lock*/) :
 		allocator(alloc),
-		dispatchers(std::move(other.dispatchers), allocator) {
+		dispatchers(std::move(other.dispatchers), allocator),
+		dispatcher_list(std::move(other.dispatcher_list)) {
+		other.dispatchers.clear();  // With unequal allocators, the elements were moved individually
+	}
+
+	static auto close_all(dispatcher_list_pointer const& list) noexcept -> void {
+		if (list) {
+			for (auto const& dispatcher : *list) {
+				dispatcher->close();
+			}
+		}
+	}
+
+	[[nodiscard]]
+	auto acquire_list() const -> dispatcher_list_pointer {
+		auto lock = std::shared_lock{dispatcher_mut};
+		return dispatcher_list;
 	}
 
 	template<typename EventT>
-	auto get_or_create_dispatcher() -> detail::synchronized_discrete_event_dispatcher<std::remove_cvref_t<EventT>, AllocatorT>& {
-		using event_type = std::remove_cvref_t<EventT>;
-		using derived_dispatcher_type = detail::synchronized_discrete_event_dispatcher<event_type, AllocatorT>;
+	[[nodiscard]]
+	auto find_dispatcher() const -> generic_dispatcher_pointer {
+		auto lock = std::shared_lock{dispatcher_mut};
 
-		auto const key = std::type_index{typeid(event_type)};
-
-		// Attempt to find an existing dispatcher
-		{
-			auto lock = std::shared_lock{dispatcher_mut};
-
-			if (auto it = dispatchers.find(key); it != dispatchers.end()) {
-				return static_cast<derived_dispatcher_type&>(*(it->second));
-			}
+		if (auto const it = dispatchers.find(std::type_index{typeid(std::remove_cvref_t<EventT>)}); it != dispatchers.end()) {
+			return it->second;
 		}
 
-		// If the dispatcher didn't exist, then acquire an exclusive lock and create it.
+		return nullptr;
+	}
+
+	// Returns a shared pointer, since another thread may assign to this object while the dispatcher is being used
+	template<typename EventT>
+	auto get_dispatcher() -> std::shared_ptr<derived_dispatcher<EventT>> {
+		if (auto existing = find_dispatcher<EventT>()) {
+			return std::static_pointer_cast<derived_dispatcher<EventT>>(std::move(existing));
+		}
+
+		// If the dispatcher didn't exist, then acquire an exclusive lock and create it. Another thread may have created
+		// it in the meantime.
 		auto lock = std::unique_lock{dispatcher_mut};
 
-		auto const [iter, inserted] = dispatchers.try_emplace(key);
+		auto const [iter, inserted] = dispatchers.try_emplace(std::type_index{typeid(std::remove_cvref_t<EventT>)});
 
-		// Check if it actually was created since two threads could get to the point where they try
-		// to acquire an exclusive lock.
 		if (inserted) {
 			try {
-				iter->second = std::allocate_shared<derived_dispatcher_type>(allocator, allocator);
+				iter->second = std::allocate_shared<derived_dispatcher<EventT>>(allocator, allocator);
+				dispatcher_list = make_list_with(iter->second);
 			}
 			catch (...) {
 				dispatchers.erase(iter);  // don't leave a null dispatcher behind
@@ -394,11 +558,25 @@ private:
 			}
 		}
 
-		return static_cast<derived_dispatcher_type&>(*(iter->second));
+		return std::static_pointer_cast<derived_dispatcher<EventT>>(iter->second);
+	}
+
+	// Requires dispatcher_mut to be locked exclusively
+	[[nodiscard]]
+	auto make_list_with(generic_dispatcher_pointer const& dispatcher) const -> dispatcher_list_pointer {
+		auto list = dispatcher_list_type{dispatcher_list_allocator_type{allocator}};
+		list.reserve((dispatcher_list ? dispatcher_list->size() : 0) + 1);
+		if (dispatcher_list) {
+			list.insert(list.end(), dispatcher_list->begin(), dispatcher_list->end());
+		}
+		list.push_back(dispatcher);
+
+		return std::allocate_shared<dispatcher_list_type>(allocator, std::move(list));
 	}
 
 	AllocatorT allocator;
 	dispatcher_map_type dispatchers{allocator};
+	dispatcher_list_pointer dispatcher_list;
 	mutable std::shared_mutex dispatcher_mut;
 };
 
