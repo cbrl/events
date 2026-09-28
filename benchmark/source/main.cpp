@@ -33,7 +33,7 @@ using nanoseconds_f64 = std::chrono::duration<double, std::nano>;
 
 static constexpr std::array callback_counts   = {1, 10, 100};
 static constexpr std::array thread_counts     = {1, 2, 4, 8};
-static constexpr std::array event_type_counts = {1, 5, 10};
+static constexpr std::array event_type_counts = {1, 10, 100};
 
 // event_dispatcher: events enqueued between calls to dispatch().
 // synchronized_event_dispatcher: events enqueued (by all producers together) in one round.
@@ -49,8 +49,9 @@ static constexpr auto min_sample_time = std::chrono::milliseconds{5};
 // The synchronized_event_dispatcher benchmark gives up after this long (which would mean that events were lost)
 static constexpr auto pipeline_timeout = std::chrono::seconds{30};
 
-static constexpr int max_event_types = 10;
-static_assert(std::ranges::max(event_type_counts) <= max_event_types);
+// The number of distinct event types that are generated (see bench_event). Each one adds template instantiations, so this
+// is only as large as event_type_counts needs.
+static constexpr int max_event_types = std::ranges::max(event_type_counts);
 
 
 // ============================================================================
@@ -197,48 +198,57 @@ auto bench_synchronized_signal_handler(int num_callbacks, int num_threads) -> st
 // Event dispatcher benchmarks
 // ============================================================================
 
+// Each index is a distinct event type. bench_event<0> through bench_event<max_event_types - 1> are generated.
 template<int N>
 struct bench_event {
 	int v;
 };
+
+// Calls function(std::integral_constant<int, N>{}) for each event type index N
+template<typename FunctionT>
+auto for_each_event_type(FunctionT&& function) -> void {
+	[&]<int... N>(std::integer_sequence<int, N...>) {
+		(function(std::integral_constant<int, N>{}), ...);
+	}(std::make_integer_sequence<int, max_event_types>{});
+}
 
 // Connects num_callbacks callbacks to each of the first num_types event types
 template<typename DispatcherT>
 auto connect_event_types(DispatcherT& dispatcher, int num_types, int num_callbacks) -> std::vector<events::connection> {
 	auto conns = std::vector<events::connection>{};
 
-	auto const connect_n = [&]<int N>(bench_event<N> /*tag*/) {
+	for_each_event_type([&]<int N>(std::integral_constant<int, N>) {
 		if (N < num_types) {
 			for (auto c = 0; c < num_callbacks; ++c) {
 				conns.push_back(dispatcher.template connect<bench_event<N>>([](bench_event<N> const&) { ++invocations; }));
 			}
 		}
-	};
-
-	[&]<int... N>(std::integer_sequence<int, N...>) {
-		(connect_n(bench_event<N>{}), ...);
-	}(std::make_integer_sequence<int, max_event_types>{});
+	});
 
 	return conns;
 }
 
-// Enqueues num_events events, spread evenly across the first num_types event types
+template<typename DispatcherT, int N>
+auto enqueue_event(DispatcherT& dispatcher, int value) -> void {
+	dispatcher.enqueue(bench_event<N>{value});
+}
+
+// enqueue_event for each event type, indexed by N, so that the type of each event can be chosen at run time
 template<typename DispatcherT>
-auto enqueue_events(DispatcherT& dispatcher, int num_events, int num_types) -> void {
+constexpr auto enqueue_functions = []<int... N>(std::integer_sequence<int, N...>) {
+	return std::array<void (*)(DispatcherT&, int), sizeof...(N)>{&enqueue_event<DispatcherT, N>...};
+}(std::make_integer_sequence<int, max_event_types>{});
+
+// Enqueues num_events events, cycling through the first num_types event types starting at first_type
+template<typename DispatcherT>
+auto enqueue_events(DispatcherT& dispatcher, int num_events, int num_types, int first_type = 0) -> void {
+	auto const& functions = enqueue_functions<DispatcherT>;
+	auto type = static_cast<std::size_t>(first_type % num_types);
+	auto const type_count = static_cast<std::size_t>(num_types);
+
 	for (auto i = 0; i < num_events; ++i) {
-		switch (i % num_types) {
-			case 0: dispatcher.enqueue(bench_event<0>{i}); break;
-			case 1: dispatcher.enqueue(bench_event<1>{i}); break;
-			case 2: dispatcher.enqueue(bench_event<2>{i}); break;
-			case 3: dispatcher.enqueue(bench_event<3>{i}); break;
-			case 4: dispatcher.enqueue(bench_event<4>{i}); break;
-			case 5: dispatcher.enqueue(bench_event<5>{i}); break;
-			case 6: dispatcher.enqueue(bench_event<6>{i}); break;
-			case 7: dispatcher.enqueue(bench_event<7>{i}); break;
-			case 8: dispatcher.enqueue(bench_event<8>{i}); break;
-			case 9: dispatcher.enqueue(bench_event<9>{i}); break;
-			default: break;
-		}
+		functions[type](dispatcher, i);
+		type = (type + 1 == type_count) ? 0 : type + 1;  // cheaper than i % num_types, which would be timed as enqueue cost
 	}
 }
 
@@ -341,7 +351,9 @@ auto bench_synchronized_event_dispatcher(int num_events, int num_callbacks, int 
 			threads.emplace_back([&, p] {
 				for (auto r = std::int64_t{0}; r < rounds; ++r) {
 					round_start.arrive_and_wait();
-					enqueue_events(dispatcher, events_per_producer, num_types);
+					// Continue the cycle of types where the previous producer's share ends, so that every type gets
+					// events even when each producer only enqueues a few
+					enqueue_events(dispatcher, events_per_producer, num_types, static_cast<int>(p) * events_per_producer);
 					producer_end[p] = clock_type::now();
 					round_end.arrive_and_wait();
 				}
